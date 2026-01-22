@@ -1,0 +1,4 @@
+port: 8080
+dispatch:
+  - domain: abc-api.com
+    forward_to: https://abc.com/api
