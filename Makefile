@@ -1,12 +1,13 @@
 # Makefile for Domain Dispatcher
 
-.PHONY: build run clean test fmt vet deps help
+.PHONY: build run clean test fmt vet deps package help
 
 # Binary name and paths
 BINARY_NAME=domain-dispatcher
 DIST_DIR=dist
 BINARY_PATH=$(DIST_DIR)/$(BINARY_NAME)
 CONFIG_FILE=config.yaml
+ZIP_NAME=$(BINARY_NAME).zip
 
 # Go parameters
 GOCMD=go
@@ -67,12 +68,20 @@ build-windows:
 build-mac:
 	mkdir -p $(DIST_DIR)
 	GOOS=darwin GOARCH=amd64 $(GOBUILD) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 -v
+	GOOS=darwin GOARCH=arm64 $(GOBUILD) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64 -v
 
 # Cross-platform build
 build-all: build-linux build-windows build-mac
 
 # Development setup
 dev-setup: deps fmt vet
+
+# Package for macOS x86
+package: build-mac
+	cp config.yaml.sample $(DIST_DIR)/config.yaml.sample
+	mv $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 $(DIST_DIR)/$(BINARY_NAME)
+	cd $(DIST_DIR) && zip $(ZIP_NAME) $(BINARY_NAME) config.yaml.sample
+	rm $(DIST_DIR)/config.yaml.sample $(DIST_DIR)/$(BINARY_NAME)*
 
 # Help target
 help:
@@ -89,5 +98,6 @@ help:
 	@echo "  build-windows - Build for Windows"
 	@echo "  build-mac     - Build for macOS"
 	@echo "  build-all     - Build for all platforms"
+	@echo "  package       - Package macOS x86 binary and config sample"
 	@echo "  dev-setup     - Setup development environment"
 	@echo "  help          - Show this help message"
