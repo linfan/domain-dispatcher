@@ -81,7 +81,7 @@ package: build-mac
 	cp config.yaml.sample $(DIST_DIR)/config.yaml.sample
 	mv $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 $(DIST_DIR)/$(BINARY_NAME)
 	cd $(DIST_DIR) && zip $(ZIP_NAME) $(BINARY_NAME) config.yaml.sample
-	rm $(DIST_DIR)/config.yaml.sample $(DIST_DIR)/$(BINARY_NAME)*
+	rm $(DIST_DIR)/config.yaml.sample $(DIST_DIR)/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-*
 
 # Help target
 help:
