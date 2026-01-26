@@ -1,4 +1,10 @@
-port: 8080
-dispatch:
-  - domain: abc-api.com
-    forward_to: https://abc.com/api
+- port: 8080
+  dispatch:
+    - domain: abc-api.com
+      forward_to: https://abc.com/api
+      type: forward
+- port: 8081
+  dispatch:
+    - domain: abc-api.com
+      forward_to: https://abc-api.com:8080
+      type: redirect

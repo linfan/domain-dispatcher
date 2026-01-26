@@ -25,23 +25,35 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	log.Printf("Starting domain dispatcher on port %d", config.Port)
-	log.Printf("Loaded %d dispatch rules", len(config.Dispatch))
+	log.Printf("Loaded %d listeners", len(config))
 
-	// Create HTTP handler
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, config)
-	})
+	// Channel to capture errors from goroutines
+	errChan := make(chan error, len(config))
 
-	// Start server
-	addr := fmt.Sprintf(":%d", config.Port)
-	log.Printf("Server listening on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	for _, listener := range config {
+		go func(l ListenerConfig) {
+			log.Printf("Starting domain dispatcher on port %d with %d rules", l.Port, len(l.Dispatch))
+			
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				handleRequest(w, r, l)
+			})
+
+			addr := fmt.Sprintf(":%d", l.Port)
+			log.Printf("Server listening on %s", addr)
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				errChan <- fmt.Errorf("server on port %d failed: %w", l.Port, err)
+			}
+		}(listener)
+	}
+
+	// Wait for any server to fail
+	if err := <-errChan; err != nil {
+		log.Fatalf("Fatal error: %v", err)
 	}
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, config *Config) {
+func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConfig) {
 	// Extract domain from Host header
 	host := r.Host
 	// Remove port if present
@@ -49,33 +61,51 @@ func handleRequest(w http.ResponseWriter, r *http.Request, config *Config) {
 		host = host[:colonIndex]
 	}
 
-	// Find forwarding target
-	forwardTo, found := config.FindForwardTarget(host)
+	// Find dispatch rule
+	rule, found := listener.FindRule(host)
 	if !found {
-		log.Printf("No mapping found for domain: %s", host)
+		log.Printf("[Port %d] No mapping found for domain: %s", listener.Port, host)
 		http.NotFound(w, r)
 		return
 	}
 
-	// Forward the request
-	if err := forwardRequest(w, r, forwardTo); err != nil {
-		log.Printf("Failed to forward request to %s: %v", forwardTo, err)
+	targetURL, err := buildTargetURL(rule.ForwardTo, r)
+	if err != nil {
+		log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	switch rule.Type {
+	case RuleTypeRedirect:
+		log.Printf("[Port %d] Redirecting %s to %s", listener.Port, host, targetURL)
+		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
+	case RuleTypeForward:
+		log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
+		if err := forwardRequest(w, r, targetURL); err != nil {
+			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+	default:
+		log.Printf("[Port %d] Unknown rule type for %s: %s", listener.Port, host, rule.Type)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
 }
 
-func forwardRequest(w http.ResponseWriter, r *http.Request, forwardTo string) error {
-	// Parse the forward URL
-	targetURL, err := url.Parse(forwardTo)
+func buildTargetURL(target string, r *http.Request) (string, error) {
+	targetURL, err := url.Parse(target)
 	if err != nil {
-		return fmt.Errorf("invalid forward URL: %w", err)
+		return "", err
 	}
 
 	// Build the target URL with original path and query
+	// Note: This preserves the original behavior of overwriting target path with request path
 	targetURL.Path = r.URL.Path
 	targetURL.RawQuery = r.URL.RawQuery
+	return targetURL.String(), nil
+}
 
+func forwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string) error {
 	// Read request body
 	var body bytes.Buffer
 	if r.Body != nil {
@@ -85,7 +115,7 @@ func forwardRequest(w http.ResponseWriter, r *http.Request, forwardTo string) er
 	}
 
 	// Create new request
-	req, err := http.NewRequest(r.Method, targetURL.String(), &body)
+	req, err := http.NewRequest(r.Method, targetURLStr, &body)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -100,8 +130,9 @@ func forwardRequest(w http.ResponseWriter, r *http.Request, forwardTo string) er
 		}
 	}
 
-	// Set Host header to target host
-	req.Host = targetURL.Host
+	// Parse target URL to get host
+	u, _ := url.Parse(targetURLStr)
+	req.Host = u.Host
 
 	// Send request
 	client := &http.Client{}
