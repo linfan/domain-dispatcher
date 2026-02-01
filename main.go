@@ -1,9 +1,8 @@
 package main
 
 import (
-	"bytes"
+	"domain-dispatcher/pkg/forwarder"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -25,18 +24,34 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	log.Printf("Loaded %d listeners", len(config))
+	log.Printf("Loaded %d listeners", len(config.Listeners))
+
+	// Create forwarder with configuration
+	fwdConfig := forwarder.Config{
+		MaxIdleConns:          config.Global.Forward.MaxIdleConns,
+		MaxIdleConnsPerHost:   config.Global.Forward.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       config.Global.Forward.MaxConnsPerHost,
+		IdleConnTimeout:       config.Global.Forward.IdleConnTimeout,
+		TLSHandshakeTimeout:   config.Global.Forward.TLSHandshakeTimeout,
+		ExpectContinueTimeout: config.Global.Forward.ExpectContinueTimeout,
+		ResponseHeaderTimeout: config.Global.Forward.ResponseHeaderTimeout,
+		DialTimeout:           config.Global.Forward.DialTimeout,
+		DialKeepAlive:         config.Global.Forward.DialKeepAlive,
+		RequestTimeout:        config.Global.Forward.RequestTimeout,
+		ForceAttemptHTTP2:     config.Global.Forward.ForceAttemptHTTP2,
+	}
+	fwd := forwarder.New(fwdConfig)
 
 	// Channel to capture errors from goroutines
-	errChan := make(chan error, len(config))
+	errChan := make(chan error, len(config.Listeners))
 
-	for _, listener := range config {
+	for _, listener := range config.Listeners {
 		go func(l ListenerConfig) {
 			log.Printf("Starting domain dispatcher on port %d with %d rules", l.Port, len(l.Dispatch))
-			
+
 			mux := http.NewServeMux()
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				handleRequest(w, r, l)
+				handleRequest(w, r, l, fwd)
 			})
 
 			addr := fmt.Sprintf(":%d", l.Port)
@@ -53,7 +68,7 @@ func main() {
 	}
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConfig) {
+func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConfig, fwd *forwarder.Forwarder) {
 	// Extract domain from Host header
 	host := r.Host
 	// Remove port if present
@@ -82,7 +97,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
 	case RuleTypeForward:
 		log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
-		if err := forwardRequest(w, r, targetURL); err != nil {
+		if err := fwd.ForwardRequest(w, r, targetURL); err != nil {
 			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
@@ -99,63 +114,7 @@ func buildTargetURL(target string, r *http.Request) (string, error) {
 	}
 
 	// Build the target URL with original path and query
-	// Note: This preserves the original behavior of overwriting target path with request path
 	targetURL.Path = r.URL.Path
 	targetURL.RawQuery = r.URL.RawQuery
 	return targetURL.String(), nil
-}
-
-func forwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string) error {
-	// Read request body
-	var body bytes.Buffer
-	if r.Body != nil {
-		if _, err := io.Copy(&body, r.Body); err != nil {
-			return fmt.Errorf("failed to read request body: %w", err)
-		}
-	}
-
-	// Create new request
-	req, err := http.NewRequest(r.Method, targetURLStr, &body)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Copy headers (except Host which should be set to target host)
-	for key, values := range r.Header {
-		if key == "Host" {
-			continue // Don't copy Host header
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-
-	// Parse target URL to get host
-	u, _ := url.Parse(targetURLStr)
-	req.Host = u.Host
-
-	// Send request
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	// Set status code
-	w.WriteHeader(resp.StatusCode)
-
-	// Copy response body
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		return fmt.Errorf("failed to copy response body: %w", err)
-	}
-
-	return nil
 }

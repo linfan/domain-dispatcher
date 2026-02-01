@@ -1,10 +1,30 @@
-- port: 8080
-  dispatch:
-    - domain: abc-api.com
-      forward_to: https://abc.com/api
-      type: forward
-- port: 8081
-  dispatch:
-    - domain: abc-api.com
-      forward_to: https://abc-api.com:8080
-      type: redirect
+# Global forward configuration (all values are optional with defaults shown below)
+global:
+  forward:
+    max_idle_conns: 1000              # Default: 1000
+    max_idle_conns_per_host: 100      # Default: 100
+    max_conns_per_host: 100           # Default: 100
+    idle_conn_timeout: 90s            # Default: 90s
+    tls_handshake_timeout: 10s        # Default: 10s
+    expect_continue_timeout: 1s       # Default: 1s
+    response_header_timeout: 30s      # Default: 30s
+    dial_timeout: 10s                 # Default: 10s
+    dial_keep_alive: 30s              # Default: 30s
+    request_timeout: 60s              # Default: 60s
+    force_attempt_http2: true         # Default: true
+
+# Listeners configuration
+listeners:
+  - port: 8080
+    dispatch:
+      # Type defaults to 'forward' if not specified
+      - domain: abc-api.com
+        forward_to: https://abc.com/api
+      - domain: xyz-api.com
+        forward_to: https://xyz.com/api
+        type: forward
+  - port: 8081
+    dispatch:
+      - domain: abc-api.com
+        forward_to: https://abc-api.com:8080
+        type: redirect
