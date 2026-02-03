@@ -120,9 +120,7 @@ func LoadConfig(filename string) (*Config, error) {
 		}
 
 		for j, rule := range listener.Dispatch {
-			if rule.Domain == "" {
-				return nil, fmt.Errorf("listener %d, rule %d: domain cannot be empty", i+1, j+1)
-			}
+			// Domain can be "*" to match all domains (including empty Host header)
 			if rule.ForwardTo == "" {
 				return nil, fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
 			}
@@ -138,12 +136,20 @@ func LoadConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
-// FindRule finds the dispatch rule for a given domain in a listener config
+// FindRule finds the dispatch rule for a given domain in a listener config.
+// It first tries exact match, then falls back to wildcard "*" rule if present.
 func (lc *ListenerConfig) FindRule(domain string) (DispatchRule, bool) {
+	var wildcardRule *DispatchRule
 	for _, rule := range lc.Dispatch {
 		if rule.Domain == domain {
 			return rule, true
 		}
+		if rule.Domain == "*" {
+			wildcardRule = &rule
+		}
+	}
+	if wildcardRule != nil {
+		return *wildcardRule, true
 	}
 	return DispatchRule{}, false
 }
