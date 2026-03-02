@@ -16,6 +16,20 @@ const (
 	RuleTypeRedirect RuleType = "redirect"
 )
 
+// ListenerType represents the protocol type for a listener
+type ListenerType string
+
+const (
+	ListenerTypeHTTP  ListenerType = "http"
+	ListenerTypeHTTPS ListenerType = "https"
+)
+
+// SSLConfig represents the global SSL/TLS configuration
+type SSLConfig struct {
+	CertFile string `yaml:"cert_file"` // Path to SSL certificate file
+	KeyFile  string `yaml:"key_file"`  // Path to SSL private key file
+}
+
 // ForwardConfig represents the configuration for forward mode with default values
 type ForwardConfig struct {
 	MaxIdleConns          int           `yaml:"max_idle_conns"`
@@ -77,12 +91,14 @@ type DispatchRule struct {
 // ListenerConfig represents the configuration for a single port listener
 type ListenerConfig struct {
 	Port     int            `yaml:"port"`
+	Type     ListenerType   `yaml:"type"` // Protocol type: http (default) or https
 	Dispatch []DispatchRule `yaml:"dispatch"`
 }
 
 // GlobalConfig represents the global application configuration
 type GlobalConfig struct {
 	Forward ForwardConfig `yaml:"forward"`
+	SSL     SSLConfig     `yaml:"ssl"` // Global SSL/TLS configuration
 }
 
 // Config represents the application configuration
@@ -114,6 +130,31 @@ func LoadConfig(filename string) (*Config, error) {
 	for i, listener := range config.Listeners {
 		if listener.Port <= 0 || listener.Port > 65535 {
 			return nil, fmt.Errorf("listener %d: invalid port: %d (must be between 1 and 65535)", i+1, listener.Port)
+		}
+
+		// Default to http if type is not set or empty
+		if listener.Type == "" {
+			config.Listeners[i].Type = ListenerTypeHTTP
+		} else if listener.Type != ListenerTypeHTTP && listener.Type != ListenerTypeHTTPS {
+			return nil, fmt.Errorf("listener %d: invalid type: %s (must be 'http' or 'https')", i+1, listener.Type)
+		}
+
+		// Validate SSL configuration for https listeners
+		if listener.Type == ListenerTypeHTTPS {
+			if config.Global.SSL.CertFile == "" {
+				return nil, fmt.Errorf("listener %d: ssl.cert_file is required for https listener", i+1)
+			}
+			if config.Global.SSL.KeyFile == "" {
+				return nil, fmt.Errorf("listener %d: ssl.key_file is required for https listener", i+1)
+			}
+			// Check if cert file exists
+			if _, err := os.Stat(config.Global.SSL.CertFile); os.IsNotExist(err) {
+				return nil, fmt.Errorf("listener %d: ssl cert file not found: %s", i+1, config.Global.SSL.CertFile)
+			}
+			// Check if key file exists
+			if _, err := os.Stat(config.Global.SSL.KeyFile); os.IsNotExist(err) {
+				return nil, fmt.Errorf("listener %d: ssl key file not found: %s", i+1, config.Global.SSL.KeyFile)
+			}
 		}
 
 		if len(listener.Dispatch) == 0 {

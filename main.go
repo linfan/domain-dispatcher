@@ -46,8 +46,12 @@ func main() {
 	errChan := make(chan error, len(config.Listeners))
 
 	for _, listener := range config.Listeners {
-		go func(l ListenerConfig) {
-			log.Printf("Starting domain dispatcher on port %d with %d rules", l.Port, len(l.Dispatch))
+		go func(l ListenerConfig, sslCert, sslKey string) {
+			protoType := "HTTP"
+			if l.Type == ListenerTypeHTTPS {
+				protoType = "HTTPS"
+			}
+			log.Printf("Starting %s domain dispatcher on port %d with %d rules", protoType, l.Port, len(l.Dispatch))
 
 			mux := http.NewServeMux()
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -55,11 +59,18 @@ func main() {
 			})
 
 			addr := fmt.Sprintf(":%d", l.Port)
-			log.Printf("Server listening on %s", addr)
-			if err := http.ListenAndServe(addr, mux); err != nil {
+			log.Printf("Server listening on %s (%s)", addr, protoType)
+
+			var err error
+			if l.Type == ListenerTypeHTTPS {
+				err = http.ListenAndServeTLS(addr, sslCert, sslKey, mux)
+			} else {
+				err = http.ListenAndServe(addr, mux)
+			}
+			if err != nil {
 				errChan <- fmt.Errorf("server on port %d failed: %w", l.Port, err)
 			}
-		}(listener)
+		}(listener, config.Global.SSL.CertFile, config.Global.SSL.KeyFile)
 	}
 
 	// Wait for any server to fail

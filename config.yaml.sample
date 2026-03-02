@@ -12,10 +12,15 @@ global:
     dial_keep_alive: 30s              # Default: 30s
     request_timeout: 60s              # Default: 60s
     force_attempt_http2: true         # Default: true
+  # Global SSL/TLS configuration (required for https listeners)
+  ssl:
+    cert_file: /path/to/server.crt    # Path to SSL certificate file
+    key_file: /path/to/server.key     # Path to SSL private key file
 
 # Listeners configuration
 listeners:
   - port: 8080
+    type: http                        # Protocol type: http (default) or https
     dispatch:
       # Type defaults to 'forward' if not specified
       - domain: abc-api.com
@@ -28,6 +33,7 @@ listeners:
           - X-Forwarded-For
           - X-Real-IP
   - port: 8081
+    type: https                      # HTTPS listener using global SSL config
     dispatch:
       - domain: abc-api.com
         forward_to: https://abc-api.com:8080
