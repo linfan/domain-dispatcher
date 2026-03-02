@@ -85,7 +85,8 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 // ForwardRequest forwards an HTTP request to a target URL and writes the response
 // to the provided ResponseWriter. It uses an optimized HTTP client with connection
 // pooling for high concurrency performance.
-func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string) error {
+// removeHeaders specifies which headers should be removed from the request before forwarding.
+func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) error {
 	// Create new request with the original body
 	var bodyReader io.Reader = r.Body
 	if r.Body != nil {
@@ -97,11 +98,20 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Copy headers (except Host which should be set to target host)
+	// Build a set of headers to remove for efficient lookup
+	headersToRemove := make(map[string]struct{}, len(removeHeaders))
+	for _, h := range removeHeaders {
+		headersToRemove[http.CanonicalHeaderKey(h)] = struct{}{}
+	}
+
+	// Copy headers (except Host and headers in removeHeaders)
 	req.Header = make(http.Header, len(r.Header))
 	for key, values := range r.Header {
 		if key == "Host" {
 			continue // Don't copy Host header
+		}
+		if _, shouldRemove := headersToRemove[key]; shouldRemove {
+			continue // Skip headers that should be removed
 		}
 		req.Header[key] = values
 	}

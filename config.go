@@ -68,9 +68,10 @@ func (fc *ForwardConfig) SetDefaults() {
 
 // DispatchRule represents a single domain forwarding or redirect rule
 type DispatchRule struct {
-	Domain    string   `yaml:"domain"`
-	ForwardTo string   `yaml:"forward_to"`
-	Type      RuleType `yaml:"type"`
+	Domain        string   `yaml:"domain"`
+	ForwardTo     string   `yaml:"forward_to"`
+	Type          RuleType `yaml:"type"`
+	RemoveHeaders []string `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
 }
 
 // ListenerConfig represents the configuration for a single port listener

@@ -23,6 +23,10 @@ listeners:
       - domain: xyz-api.com
         forward_to: https://xyz.com/api
         type: forward
+        # Optional: remove specified headers before forwarding
+        remove_headers:
+          - X-Forwarded-For
+          - X-Real-IP
   - port: 8081
     dispatch:
       - domain: abc-api.com

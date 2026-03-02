@@ -97,7 +97,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
 	case RuleTypeForward:
 		log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
-		if err := fwd.ForwardRequest(w, r, targetURL); err != nil {
+		if err := fwd.ForwardRequest(w, r, targetURL, rule.RemoveHeaders); err != nil {
 			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
