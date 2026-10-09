@@ -1,14 +1,21 @@
 package forwarder
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
+
+// ErrResponseStarted wraps failures that occurred after the response had already
+// begun reaching the client. Callers must not write an error response in that case.
+var ErrResponseStarted = errors.New("response already started")
 
 // Config represents the configuration for forward mode
 type Config struct {
@@ -21,7 +28,8 @@ type Config struct {
 	ResponseHeaderTimeout time.Duration
 	DialTimeout           time.Duration
 	DialKeepAlive         time.Duration
-	RequestTimeout        time.Duration
+	RequestTimeout        time.Duration // max wait for upstream response headers; does not bound the response body
+	StreamingFlush        bool          // flush streaming (SSE) responses chunk by chunk
 	ForceAttemptHTTP2     bool
 }
 
@@ -38,6 +46,7 @@ func DefaultConfig() Config {
 		DialTimeout:           10 * time.Second,
 		DialKeepAlive:         30 * time.Second,
 		RequestTimeout:        60 * time.Second,
+		StreamingFlush:        true,
 		ForceAttemptHTTP2:     true,
 	}
 }
@@ -74,9 +83,11 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 			}).DialContext,
 		}
 
+		// No Client.Timeout: it also bounds reading the response body, which would
+		// cut off long-lived streaming responses. RequestTimeout is applied as a
+		// context deadline in ForwardRequest instead.
 		f.httpClient = &http.Client{
 			Transport: transport,
-			Timeout:   f.config.RequestTimeout,
 		}
 	})
 	return f.httpClient
@@ -86,6 +97,8 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 // to the provided ResponseWriter. It uses an optimized HTTP client with connection
 // pooling for high concurrency performance.
 // removeHeaders specifies which headers should be removed from the request before forwarding.
+// Config.RequestTimeout bounds only the wait for response headers. Errors raised after the
+// response has started reaching the client wrap ErrResponseStarted.
 func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) error {
 	// Create new request with the original body
 	var bodyReader io.Reader = r.Body
@@ -93,7 +106,7 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 		bodyReader = r.Body
 	}
 
-	req, err := http.NewRequest(r.Method, targetURLStr, bodyReader)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURLStr, bodyReader)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -123,8 +136,16 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 	}
 	req.Host = u.Host
 
-	// Send request using the optimized HTTP client with connection pooling
+	// RequestTimeout bounds only the wait for the upstream response headers: the
+	// deadline is dropped as soon as headers arrive so that streaming response
+	// bodies can keep transferring for as long as they need.
+	ctx, cancel := context.WithCancel(req.Context())
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	headerTimer := time.AfterFunc(f.config.RequestTimeout, cancel)
 	resp, err := f.getHTTPClient().Do(req)
+	headerTimer.Stop()
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
@@ -138,11 +159,42 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 
-	// Copy response body using io.Copy for efficient streaming
-	// This uses splice/sendfile on Linux for zero-copy when possible
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		return fmt.Errorf("failed to copy response body: %w", err)
+	// Streaming responses are flushed chunk by chunk; everything else keeps the
+	// io.Copy fast path (splice/sendfile on Linux when possible).
+	streaming := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+	if streaming && f.config.StreamingFlush {
+		err = copyStreaming(w, resp.Body)
+	} else {
+		_, err = io.Copy(w, resp.Body)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: failed to copy response body: %w", ErrResponseStarted, err)
 	}
 
 	return nil
+}
+
+// copyStreaming relays a streaming (SSE) response, flushing after every chunk.
+// Without the explicit flush the writes sit in net/http's 2 KiB pre-chunking
+// buffer, so events pile up and reach the client in bursts.
+func copyStreaming(w http.ResponseWriter, r io.Reader) error {
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := r.Read(buf)
+		if n > 0 {
+			if _, err := w.Write(buf[:n]); err != nil {
+				return err
+			}
+			if err := rc.Flush(); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"domain-dispatcher/pkg/forwarder"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -53,6 +54,7 @@ func main() {
 		DialTimeout:           config.Global.Forward.DialTimeout,
 		DialKeepAlive:         config.Global.Forward.DialKeepAlive,
 		RequestTimeout:        config.Global.Forward.RequestTimeout,
+		StreamingFlush:        config.Global.Forward.StreamingFlushEnabled(),
 		ForceAttemptHTTP2:     config.Global.Forward.ForceAttemptHTTP2,
 	}
 	fwd := forwarder.New(fwdConfig)
@@ -139,7 +141,9 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
 		if err := fwd.ForwardRequest(w, r, targetURL, rule.RemoveHeaders); err != nil {
 			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			if !errors.Is(err, forwarder.ErrResponseStarted) {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+			}
 		}
 	default:
 		log.Printf("[Port %d] Unknown rule type for %s: %s", listener.Port, host, rule.Type)

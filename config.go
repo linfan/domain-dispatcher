@@ -44,8 +44,16 @@ type ForwardConfig struct {
 	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout"`
 	DialTimeout           time.Duration `yaml:"dial_timeout"`
 	DialKeepAlive         time.Duration `yaml:"dial_keep_alive"`
-	RequestTimeout        time.Duration `yaml:"request_timeout"`
+	RequestTimeout        time.Duration `yaml:"request_timeout"`   // Max wait for upstream response headers; does not limit response body transfer
+	StreamingFlush        *bool         `yaml:"streaming_flush"`   // Flush streaming (SSE) responses chunk by chunk (default true)
 	ForceAttemptHTTP2     bool          `yaml:"force_attempt_http2"`
+}
+
+// StreamingFlushEnabled reports whether streaming responses are relayed chunk by
+// chunk with an explicit flush after each chunk (default true). When disabled,
+// io.Copy's fast path is used for streaming responses as well.
+func (fc *ForwardConfig) StreamingFlushEnabled() bool {
+	return fc.StreamingFlush == nil || *fc.StreamingFlush
 }
 
 // SetDefaults sets default values for forward configuration
