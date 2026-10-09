@@ -88,7 +88,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 	}
 
 	// Find dispatch rule
-	rule, found := listener.FindRule(host)
+	rule, found := listener.FindRule(host, r.URL.Path)
 	if !found {
 		log.Printf("[Port %d] No mapping found for domain: %s", listener.Port, host)
 		http.NotFound(w, r)

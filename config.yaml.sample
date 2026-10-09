@@ -39,6 +39,19 @@ listeners:
         mock_headers:                 # Optional: response headers
           Content-Type: application/json
         mock_body: '{"status":"ok","message":"mock response"}'
+      # Optional 'path' filters a rule by request path:
+      #   exact match: /health  |  wildcard prefix: /api/*
+      # Rules without 'path' match any path of the domain. Match priority:
+      # exact domain+path > exact domain+wildcard path > exact domain > wildcard domain (cascading)
+      - domain: mock-api.com
+        path: /health                 # Only requests to /health reach this rule
+        type: mock
+        mock_body: '{"status":"healthy"}'
+        mock_headers:
+          Content-Type: application/json
+      - domain: xyz-api.com
+        path: /api/*                  # Only requests under /api/ reach this rule
+        forward_to: https://xyz.com/backend
   - port: 8081
     type: https                      # HTTPS listener using global SSL config
     dispatch:

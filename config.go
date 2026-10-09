@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -85,6 +86,7 @@ func (fc *ForwardConfig) SetDefaults() {
 // DispatchRule represents a single domain dispatch rule
 type DispatchRule struct {
 	Domain        string            `yaml:"domain"`
+	Path          string            `yaml:"path"` // URL path pattern to match (optional, supports wildcard e.g. /api/*)
 	ForwardTo     string            `yaml:"forward_to"`
 	Type          RuleType          `yaml:"type"`
 	RemoveHeaders []string          `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
@@ -191,20 +193,43 @@ func LoadConfig(filename string) (*Config, error) {
 	return &config, nil
 }
 
-// FindRule finds the dispatch rule for a given domain in a listener config.
-// It first tries exact match, then falls back to wildcard "*" rule if present.
-func (lc *ListenerConfig) FindRule(domain string) (DispatchRule, bool) {
-	var wildcardRule *DispatchRule
-	for _, rule := range lc.Dispatch {
+// FindRule finds the best matching dispatch rule for a given domain and request path.
+// Priority (highest to lowest): exact domain > wildcard domain; exact path > wildcard path > no path.
+// The rule with the highest combined score wins.
+func (lc *ListenerConfig) FindRule(domain, reqPath string) (DispatchRule, bool) {
+	var bestRule *DispatchRule
+	bestScore := -1
+
+	for i := range lc.Dispatch {
+		rule := &lc.Dispatch[i]
+		score := 0
+
 		if rule.Domain == domain {
-			return rule, true
+			score += 100
+		} else if rule.Domain == "*" {
+			score += 10
+		} else {
+			continue
 		}
-		if rule.Domain == "*" {
-			wildcardRule = &rule
+
+		if rule.Path != "" {
+			if rule.Path == reqPath {
+				score += 50
+			} else if strings.HasSuffix(rule.Path, "/*") && strings.HasPrefix(reqPath, rule.Path[:len(rule.Path)-1]) {
+				score += 5
+			} else {
+				continue
+			}
+		}
+
+		if score > bestScore {
+			bestScore = score
+			bestRule = rule
 		}
 	}
-	if wildcardRule != nil {
-		return *wildcardRule, true
+
+	if bestRule != nil {
+		return *bestRule, true
 	}
 	return DispatchRule{}, false
 }
