@@ -10,12 +10,21 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ErrResponseStarted wraps failures that occurred after the response had already
 // begun reaching the client. Callers must not write an error response in that case.
 var ErrResponseStarted = errors.New("response already started")
+
+// ErrStreamIdle marks a response body that was aborted because the upstream sent
+// no bytes for Config.StreamIdleTimeout.
+var ErrStreamIdle = errors.New("stream idle")
+
+// ErrBodyTimeout marks a non-streaming response body that was aborted because
+// transferring it took longer than Config.ResponseBodyTimeout.
+var ErrBodyTimeout = errors.New("response body timeout")
 
 // Config represents the configuration for forward mode
 type Config struct {
@@ -29,6 +38,8 @@ type Config struct {
 	DialTimeout           time.Duration
 	DialKeepAlive         time.Duration
 	RequestTimeout        time.Duration // max wait for upstream response headers; does not bound the response body
+	StreamIdleTimeout     time.Duration // abort a response body that sends no bytes for this long; 0 disables it
+	ResponseBodyTimeout   time.Duration // absolute cap on the non-streaming response body phase; 0 disables it
 	StreamingFlush        bool          // flush streaming (SSE) responses chunk by chunk
 	ForceAttemptHTTP2     bool
 }
@@ -97,8 +108,10 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 // to the provided ResponseWriter. It uses an optimized HTTP client with connection
 // pooling for high concurrency performance.
 // removeHeaders specifies which headers should be removed from the request before forwarding.
-// Config.RequestTimeout bounds only the wait for response headers. Errors raised after the
-// response has started reaching the client wrap ErrResponseStarted.
+// Config.RequestTimeout bounds only the wait for response headers; Config.StreamIdleTimeout
+// aborts a body that stops delivering bytes, and Config.ResponseBodyTimeout additionally
+// caps how long a non-streaming body may take overall. Errors raised after the response
+// has started reaching the client wrap ErrResponseStarted.
 func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) error {
 	// Create new request with the original body
 	var bodyReader io.Reader = r.Body
@@ -143,6 +156,8 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 	defer cancel()
 	req = req.WithContext(ctx)
 
+	var abort atomic.Pointer[watchdog]
+
 	headerTimer := time.AfterFunc(f.config.RequestTimeout, cancel)
 	resp, err := f.getHTTPClient().Do(req)
 	headerTimer.Stop()
@@ -159,19 +174,71 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 
+	streaming := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
+
+	// Both watchdogs bound the body phase only, and start counting now that the
+	// response headers have arrived.
+	var body io.Reader = resp.Body
+	if f.config.StreamIdleTimeout > 0 {
+		idleTimer := armWatchdog(&abort, ErrStreamIdle, f.config.StreamIdleTimeout, cancel)
+		defer idleTimer.Stop()
+		body = &idleResetReader{r: resp.Body, idle: f.config.StreamIdleTimeout, timer: idleTimer}
+	}
+	// A streaming body has no meaningful duration cap, so ResponseBodyTimeout only
+	// bounds ordinary responses, which are expected to transfer promptly.
+	if !streaming && f.config.ResponseBodyTimeout > 0 {
+		defer armWatchdog(&abort, ErrBodyTimeout, f.config.ResponseBodyTimeout, cancel).Stop()
+	}
+
 	// Streaming responses are flushed chunk by chunk; everything else keeps the
 	// io.Copy fast path (splice/sendfile on Linux when possible).
-	streaming := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 	if streaming && f.config.StreamingFlush {
-		err = copyStreaming(w, resp.Body)
+		err = copyStreaming(w, body)
 	} else {
-		_, err = io.Copy(w, resp.Body)
+		_, err = io.Copy(w, body)
 	}
 	if err != nil {
+		// The cancellation came from our own watchdog, not from the client hanging up.
+		if wd := abort.Load(); wd != nil {
+			err = fmt.Errorf("%w after %s: %w", wd.err, wd.limit, err)
+		}
 		return fmt.Errorf("%w: failed to copy response body: %w", ErrResponseStarted, err)
 	}
 
 	return nil
+}
+
+// watchdog records which body-phase limit aborted a response, so the resulting
+// error can name it instead of guessing from the remaining context state.
+type watchdog struct {
+	err   error
+	limit time.Duration
+}
+
+// armWatchdog starts a timer that publishes reason into abort and then cancels
+// the request. The first timer to fire wins.
+func armWatchdog(abort *atomic.Pointer[watchdog], reason error, limit time.Duration, cancel context.CancelFunc) *time.Timer {
+	wd := &watchdog{err: reason, limit: limit}
+	return time.AfterFunc(limit, func() {
+		abort.CompareAndSwap(nil, wd)
+		cancel()
+	})
+}
+
+// idleResetReader re-arms the idle timer on every read, so only a genuine
+// stall - not a long but healthy stream - trips the timeout.
+type idleResetReader struct {
+	r     io.Reader
+	idle  time.Duration
+	timer *time.Timer
+}
+
+func (p *idleResetReader) Read(buf []byte) (int, error) {
+	n, err := p.r.Read(buf)
+	if n > 0 || err == io.EOF {
+		p.timer.Reset(p.idle)
+	}
+	return n, err
 }
 
 // copyStreaming relays a streaming (SSE) response, flushing after every chunk.

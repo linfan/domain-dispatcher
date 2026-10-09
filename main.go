@@ -54,6 +54,8 @@ func main() {
 		DialTimeout:           config.Global.Forward.DialTimeout,
 		DialKeepAlive:         config.Global.Forward.DialKeepAlive,
 		RequestTimeout:        config.Global.Forward.RequestTimeout,
+		StreamIdleTimeout:     config.Global.Forward.StreamIdleTimeout,
+		ResponseBodyTimeout:   config.Global.Forward.ResponseBodyTimeout,
 		StreamingFlush:        config.Global.Forward.StreamingFlushEnabled(),
 		ForceAttemptHTTP2:     config.Global.Forward.ForceAttemptHTTP2,
 	}

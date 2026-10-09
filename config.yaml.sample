@@ -11,6 +11,8 @@ global:
     dial_timeout: 10s                 # Default: 10s
     dial_keep_alive: 30s              # Default: 30s
     request_timeout: 60s              # Max wait for upstream response headers (does not limit body transfer); default: 60s
+    stream_idle_timeout: 0            # Abort a body that receives no bytes for this long; 0/omitted = disabled (e.g. 120s)
+    response_body_timeout: 0          # Total duration cap for non-streaming response bodies; 0/omitted = disabled (e.g. 300s)
     streaming_flush: true             # Flush streaming (SSE) responses chunk by chunk; default: true
     force_attempt_http2: true         # Default: true
   # Global SSL/TLS configuration (required for https listeners)
