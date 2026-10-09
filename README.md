@@ -1,34 +1,72 @@
 # Domain Dispatcher
 
-A Go application that acts as a domain-based HTTP request dispatcher. It listens on a configurable port and forwards requests to different backend services based on the domain in the request.
+A Go application that acts as a domain-based HTTP request dispatcher. It listens on one or more ports and forwards, redirects, or mocks HTTP requests based on the domain and path in the request.
 
 ## Features
 
-- **Domain-based routing**: Route requests based on the Host header
-- **Protocol flexibility**: Forward between HTTP and HTTPS protocols
-- **Preserves request details**: Maintains method, headers, path, query parameters, and body
-- **YAML configuration**: Easy-to-edit configuration file
-- **404 for unmapped domains**: Returns 404 for domains not configured in dispatch rules
+- **Domain-based routing**: Route requests based on the Host header, with `*` as a fallback wildcard
+- **Path matching**: Optional `path` filter per rule, exact (`/health`) or prefix wildcard (`/api/*`)
+- **Manual rule priority**: `priority` adds to the automatic match score to order overlapping rules
+- **Multiple dispatch types**: `forward` (reverse proxy), `redirect` (302), `mock` (local canned response)
+- **Header control**: Remove configured headers before forwarding
+- **SSE-aware forwarding**: Streaming responses are flushed chunk by chunk, the client's compression negotiation is not forwarded upstream (prevents event bursts), and response-header / body-idle / body-duration timeouts are configurable
+- **HTTP and HTTPS listeners**: HTTPS uses a global certificate configuration
+- **Optional file logging**: Size-based rotation via `global.log`
+- **YAML configuration**: Multiple listeners, each with its own rule set
+- **404 for unmapped domains**: Domains not matching any rule get a 404
 
 ## Configuration
 
-Create a `config.yaml` file with the following structure:
+See `config.yaml.sample` for the full annotated reference. A minimal example:
 
 ```yaml
-port: 8080
-dispatch:
-  - domain: abc.com
-    forward_to: https://balala.net/api
-  - domain: example.org
-    forward_to: http://localhost:3000
+global:
+  forward:
+    request_timeout: 60s             # max wait for upstream response headers
+    stream_idle_timeout: 120s        # abort a body that stalls this long (0s = off)
+    response_body_timeout: 300s      # total cap for non-streaming bodies (0s = off)
+  ssl:
+    cert_file: /path/to/server.crt
+    key_file: /path/to/server.key
+  log:                               # optional; omit for stderr
+    dir: /var/log/domain-dispatcher
+    filename: app.log
+
+listeners:
+  - port: 8080
+    type: http
+    dispatch:
+      - domain: abc-api.com
+        forward_to: https://abc.com/api
+      - domain: xyz-api.com
+        path: /api/*                 # only requests under /api/
+        forward_to: https://xyz.com/backend
+      - domain: mock-api.com
+        path: /health
+        type: mock                   # local response, no upstream
+        priority: 100                # raise above the automatic match score
+        mock_status: 200
+        mock_headers:
+          Content-Type: application/json
+        mock_body: '{"status":"healthy"}'
+      - domain: old-api.com
+        forward_to: https://new-api.com
+        type: redirect
 ```
 
 ### Configuration Fields
 
-- `port`: The port number to listen on (1-65535)
-- `dispatch`: Array of dispatch rules
-  - `domain`: The domain to match (without protocol or port)
-  - `forward_to`: The full URL to forward requests to (including protocol)
+- `listeners`: Array of listeners
+  - `port`: The port number to listen on (1-65535)
+  - `type`: `http` (default) or `https` (requires `global.ssl`)
+  - `dispatch`: Array of dispatch rules
+    - `domain`: The domain to match (without protocol or port); `*` matches any domain
+    - `path`: Optional path pattern: exact (`/health`) or prefix wildcard (`/api/*`)
+    - `forward_to`: Target URL (required for `forward` and `redirect`, optional for `mock`)
+    - `type`: `forward` (default), `redirect` or `mock`
+    - `priority`: Optional integer added to the automatic match score
+    - `remove_headers`: Headers to strip before forwarding (only `forward`)
+    - `mock_status` / `mock_headers` / `mock_body`: Mock response definition (only `mock`)
 
 ## Building
 
@@ -54,24 +92,24 @@ With the example configuration above:
 
 ## How It Works
 
-1. The application listens on the configured port
+1. The application listens on each configured port
 2. When a request comes in, it extracts the domain from the `Host` header
-3. It looks up the domain in the dispatch configuration
-4. If found, it forwards the request to the target URL
-5. If not found, it returns a 404 Not Found response
-6. All request details (method, headers, path, query, body) are preserved during forwarding
+3. It picks the best matching rule by domain/path score (plus optional `priority`)
+4. `forward` proxies the request to the target URL, `redirect` answers with a 302, `mock` answers locally
+5. If no rule matches, it returns a 404 Not Found response
 
 ## Request Forwarding Details
 
 - **Method**: Preserved (GET, POST, PUT, DELETE, etc.)
-- **Headers**: All headers are copied except `Host` (set to target host)
+- **Headers**: All headers are copied except `Host` (set to target host) and, by default, `Accept-Encoding` (see `disable_compression`)
 - **Path and Query**: Original path and query parameters are maintained
 - **Body**: Request body is forwarded as-is
 - **Protocol**: Supports forwarding between HTTP and HTTPS
+- **Streaming**: `text/event-stream` responses are flushed chunk by chunk so SSE events are delivered immediately
 
 ## Error Handling
 
 - Invalid configuration: Application exits with error message
 - Missing config file: Application exits with usage message
-- Network errors during forwarding: Returns 500 Internal Server Error
-- Unmapped domains: Returns 404 Not Found
+- Network errors before the response starts: Returns 500 Internal Server Error
+- Errors after the response has started streaming: Only logged (the status line is already sent)
