@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -14,6 +15,7 @@ type RuleType string
 const (
 	RuleTypeForward  RuleType = "forward"
 	RuleTypeRedirect RuleType = "redirect"
+	RuleTypeMock     RuleType = "mock"
 )
 
 // ListenerType represents the protocol type for a listener
@@ -80,12 +82,15 @@ func (fc *ForwardConfig) SetDefaults() {
 	// ForceAttemptHTTP2 defaults to true
 }
 
-// DispatchRule represents a single domain forwarding or redirect rule
+// DispatchRule represents a single domain dispatch rule
 type DispatchRule struct {
-	Domain        string   `yaml:"domain"`
-	ForwardTo     string   `yaml:"forward_to"`
-	Type          RuleType `yaml:"type"`
-	RemoveHeaders []string `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
+	Domain        string            `yaml:"domain"`
+	ForwardTo     string            `yaml:"forward_to"`
+	Type          RuleType          `yaml:"type"`
+	RemoveHeaders []string          `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
+	MockStatus    int               `yaml:"mock_status"`    // HTTP status code for mock response (default 200, only for mock type)
+	MockHeaders   map[string]string `yaml:"mock_headers"`   // Response headers for mock type
+	MockBody      string            `yaml:"mock_body"`      // Response body for mock type
 }
 
 // ListenerConfig represents the configuration for a single port listener
@@ -163,14 +168,22 @@ func LoadConfig(filename string) (*Config, error) {
 
 		for j, rule := range listener.Dispatch {
 			// Domain can be "*" to match all domains (including empty Host header)
-			if rule.ForwardTo == "" {
-				return nil, fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
-			}
 			// Default to forward if type is not set or empty
 			if rule.Type == "" {
 				config.Listeners[i].Dispatch[j].Type = RuleTypeForward
-			} else if rule.Type != RuleTypeForward && rule.Type != RuleTypeRedirect {
-				return nil, fmt.Errorf("listener %d, rule %d: invalid type: %s (must be 'forward' or 'redirect')", i+1, j+1, rule.Type)
+			} else if rule.Type != RuleTypeForward && rule.Type != RuleTypeRedirect && rule.Type != RuleTypeMock {
+				return nil, fmt.Errorf("listener %d, rule %d: invalid type: %s (must be 'forward', 'redirect' or 'mock')", i+1, j+1, rule.Type)
+			}
+
+			// forward_to is not required for mock rules
+			if rule.Type != RuleTypeMock && rule.ForwardTo == "" {
+				return nil, fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
+			}
+
+			if rule.Type == RuleTypeMock {
+				if config.Listeners[i].Dispatch[j].MockStatus == 0 {
+					config.Listeners[i].Dispatch[j].MockStatus = http.StatusOK
+				}
 			}
 		}
 	}

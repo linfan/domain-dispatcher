@@ -32,6 +32,13 @@ listeners:
         remove_headers:
           - X-Forwarded-For
           - X-Real-IP
+      # Mock rule: respond locally without contacting any upstream
+      - domain: mock-api.com
+        type: mock
+        mock_status: 200              # Optional: HTTP status code (default 200)
+        mock_headers:                 # Optional: response headers
+          Content-Type: application/json
+        mock_body: '{"status":"ok","message":"mock response"}'
   - port: 8081
     type: https                      # HTTPS listener using global SSL config
     dispatch:

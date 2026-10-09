@@ -95,18 +95,32 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		return
 	}
 
-	targetURL, err := buildTargetURL(rule.ForwardTo, r)
-	if err != nil {
-		log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-
 	switch rule.Type {
+	case RuleTypeMock:
+		log.Printf("[Port %d] Mock response for %s (status=%d)", listener.Port, host, rule.MockStatus)
+		for k, v := range rule.MockHeaders {
+			w.Header().Set(k, v)
+		}
+		w.WriteHeader(rule.MockStatus)
+		if rule.MockBody != "" {
+			w.Write([]byte(rule.MockBody))
+		}
 	case RuleTypeRedirect:
+		targetURL, err := buildTargetURL(rule.ForwardTo, r)
+		if err != nil {
+			log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 		log.Printf("[Port %d] Redirecting %s to %s", listener.Port, host, targetURL)
 		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
 	case RuleTypeForward:
+		targetURL, err := buildTargetURL(rule.ForwardTo, r)
+		if err != nil {
+			log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
 		log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
 		if err := fwd.ForwardRequest(w, r, targetURL, rule.RemoveHeaders); err != nil {
 			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, err)
