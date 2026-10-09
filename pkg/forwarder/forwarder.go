@@ -41,6 +41,7 @@ type Config struct {
 	StreamIdleTimeout     time.Duration // abort a response body that sends no bytes for this long; 0 disables it
 	ResponseBodyTimeout   time.Duration // absolute cap on the non-streaming response body phase; 0 disables it
 	StreamingFlush        bool          // flush streaming (SSE) responses chunk by chunk
+	DisableCompression    bool          // never negotiate compression with the upstream
 	ForceAttemptHTTP2     bool
 }
 
@@ -58,6 +59,7 @@ func DefaultConfig() Config {
 		DialKeepAlive:         30 * time.Second,
 		RequestTimeout:        60 * time.Second,
 		StreamingFlush:        true,
+		DisableCompression:    true,
 		ForceAttemptHTTP2:     true,
 	}
 }
@@ -88,6 +90,10 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 			ExpectContinueTimeout: f.config.ExpectContinueTimeout,
 			ResponseHeaderTimeout: f.config.ResponseHeaderTimeout,
 			ForceAttemptHTTP2:     f.config.ForceAttemptHTTP2,
+			// A compressing gateway buffers the SSE stream in the compressor,
+			// so events pile up there and reach the client in bursts seconds
+			// later. Identity responses are valid for every client.
+			DisableCompression: f.config.DisableCompression,
 			DialContext: (&net.Dialer{
 				Timeout:   f.config.DialTimeout,
 				KeepAlive: f.config.DialKeepAlive,
@@ -135,6 +141,13 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 	for key, values := range r.Header {
 		if key == "Host" {
 			continue // Don't copy Host header
+		}
+		if key == "Accept-Encoding" && f.config.DisableCompression {
+			// Same reason as Transport.DisableCompression: if the client's
+			// encoding preference reached the upstream, a compressing gateway
+			// would buffer the SSE stream and deliver events in bursts.
+			// Identity responses are valid for every client.
+			continue
 		}
 		if _, shouldRemove := headersToRemove[key]; shouldRemove {
 			continue // Skip headers that should be removed

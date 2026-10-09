@@ -48,6 +48,7 @@ type ForwardConfig struct {
 	StreamIdleTimeout     time.Duration `yaml:"stream_idle_timeout"`   // Abort the response body if the upstream sends no bytes for this long (0 = disabled)
 	ResponseBodyTimeout   time.Duration `yaml:"response_body_timeout"` // Total duration cap for a non-streaming response body (0 = disabled)
 	StreamingFlush        *bool         `yaml:"streaming_flush"`       // Flush streaming (SSE) responses chunk by chunk (default true)
+	DisableCompression    *bool         `yaml:"disable_compression"`   // Never negotiate compression with the upstream (default true)
 	ForceAttemptHTTP2     bool          `yaml:"force_attempt_http2"`
 }
 
@@ -56,6 +57,13 @@ type ForwardConfig struct {
 // io.Copy's fast path is used for streaming responses as well.
 func (fc *ForwardConfig) StreamingFlushEnabled() bool {
 	return fc.StreamingFlush == nil || *fc.StreamingFlush
+}
+
+// CompressionDisabled reports whether compression negotiation with the upstream
+// is disabled (default true). A compressing gateway buffers SSE streams in the
+// compressor, so events pile up there and reach the client in bursts.
+func (fc *ForwardConfig) CompressionDisabled() bool {
+	return fc.DisableCompression == nil || *fc.DisableCompression
 }
 
 // SetDefaults sets default values for forward configuration

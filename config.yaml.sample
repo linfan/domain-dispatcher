@@ -14,6 +14,7 @@ global:
     stream_idle_timeout: 0            # Abort a body that receives no bytes for this long; 0/omitted = disabled (e.g. 120s)
     response_body_timeout: 0          # Total duration cap for non-streaming response bodies; 0/omitted = disabled (e.g. 300s)
     streaming_flush: true             # Flush streaming (SSE) responses chunk by chunk; default: true
+    disable_compression: true         # Never negotiate compression with the upstream (prevents SSE burst buffering); default: true
     force_attempt_http2: true         # Default: true
   # Global SSL/TLS configuration (required for https listeners)
   ssl:

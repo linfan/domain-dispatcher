@@ -57,6 +57,7 @@ func main() {
 		StreamIdleTimeout:     config.Global.Forward.StreamIdleTimeout,
 		ResponseBodyTimeout:   config.Global.Forward.ResponseBodyTimeout,
 		StreamingFlush:        config.Global.Forward.StreamingFlushEnabled(),
+		DisableCompression:    config.Global.Forward.CompressionDisabled(),
 		ForceAttemptHTTP2:     config.Global.Forward.ForceAttemptHTTP2,
 	}
 	fwd := forwarder.New(fwdConfig)
