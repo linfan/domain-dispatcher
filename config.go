@@ -44,10 +44,10 @@ type ForwardConfig struct {
 	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout"`
 	DialTimeout           time.Duration `yaml:"dial_timeout"`
 	DialKeepAlive         time.Duration `yaml:"dial_keep_alive"`
-	RequestTimeout        time.Duration `yaml:"request_timeout"`        // Max wait for upstream response headers; does not limit response body transfer
-	StreamIdleTimeout     time.Duration `yaml:"stream_idle_timeout"`    // Abort the response body if the upstream sends no bytes for this long (0 = disabled)
-	ResponseBodyTimeout   time.Duration `yaml:"response_body_timeout"`  // Total duration cap for a non-streaming response body (0 = disabled)
-	StreamingFlush        *bool         `yaml:"streaming_flush"`        // Flush streaming (SSE) responses chunk by chunk (default true)
+	RequestTimeout        time.Duration `yaml:"request_timeout"`       // Max wait for upstream response headers; does not limit response body transfer
+	StreamIdleTimeout     time.Duration `yaml:"stream_idle_timeout"`   // Abort the response body if the upstream sends no bytes for this long (0 = disabled)
+	ResponseBodyTimeout   time.Duration `yaml:"response_body_timeout"` // Total duration cap for a non-streaming response body (0 = disabled)
+	StreamingFlush        *bool         `yaml:"streaming_flush"`       // Flush streaming (SSE) responses chunk by chunk (default true)
 	ForceAttemptHTTP2     bool          `yaml:"force_attempt_http2"`
 }
 
