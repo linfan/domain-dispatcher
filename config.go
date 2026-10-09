@@ -218,7 +218,6 @@ func LoadConfig(filename string) (*Config, error) {
 		}
 
 		for j, rule := range listener.Dispatch {
-			// Domain can be "*" to match all domains (including empty Host header)
 			// Default to forward if type is not set or empty
 			if rule.Type == "" {
 				config.Listeners[i].Dispatch[j].Type = RuleTypeForward
