@@ -43,9 +43,11 @@ listeners:
       #   exact match: /health  |  wildcard prefix: /api/*
       # Rules without 'path' match any path of the domain. Match priority:
       # exact domain+path > exact domain+wildcard path > exact domain > wildcard domain (cascading)
+      # Optional 'priority' forces manual ordering: it is added to the automatic score.
       - domain: mock-api.com
         path: /health                 # Only requests to /health reach this rule
         type: mock
+        priority: 100                 # Raise above the automatic score when rules overlap
         mock_body: '{"status":"healthy"}'
         mock_headers:
           Content-Type: application/json

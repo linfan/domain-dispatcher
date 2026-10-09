@@ -89,6 +89,7 @@ type DispatchRule struct {
 	Path          string            `yaml:"path"` // URL path pattern to match (optional, supports wildcard e.g. /api/*)
 	ForwardTo     string            `yaml:"forward_to"`
 	Type          RuleType          `yaml:"type"`
+	Priority      int               `yaml:"priority"`       // Manual priority adjustment added to matching score (default 0)
 	RemoveHeaders []string          `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
 	MockStatus    int               `yaml:"mock_status"`    // HTTP status code for mock response (default 200, only for mock type)
 	MockHeaders   map[string]string `yaml:"mock_headers"`   // Response headers for mock type
@@ -195,14 +196,15 @@ func LoadConfig(filename string) (*Config, error) {
 
 // FindRule finds the best matching dispatch rule for a given domain and request path.
 // Priority (highest to lowest): exact domain > wildcard domain; exact path > wildcard path > no path.
-// The rule with the highest combined score wins.
+// The rule with the highest combined score wins. Each rule's Priority field is added to its score,
+// allowing manual override of the automatic matching order.
 func (lc *ListenerConfig) FindRule(domain, reqPath string) (DispatchRule, bool) {
 	var bestRule *DispatchRule
 	bestScore := -1
 
 	for i := range lc.Dispatch {
 		rule := &lc.Dispatch[i]
-		score := 0
+		score := rule.Priority
 
 		if rule.Domain == domain {
 			score += 100
