@@ -16,6 +16,13 @@ global:
   ssl:
     cert_file: /path/to/server.crt    # Path to SSL certificate file
     key_file: /path/to/server.key     # Path to SSL private key file
+  # Optional file logging with size-based rotation.
+  # Enabled only when both dir and filename are set; otherwise logs go to stderr.
+  log:
+    dir: /var/log/domain-dispatcher   # Directory for log files
+    filename: app.log                 # Log file name
+    max_size: 100                     # Max size (MB) of one log file before rotation, default 100
+    max_backups: 10                   # Max number of rotated files to keep, default 10
 
 # Listeners configuration
 listeners:

@@ -103,10 +103,36 @@ type ListenerConfig struct {
 	Dispatch []DispatchRule `yaml:"dispatch"`
 }
 
+// LogConfig represents the logging configuration.
+// When both Dir and Filename are set, all runtime logs are written to the file
+// with size-based rotation.
+type LogConfig struct {
+	Dir        string `yaml:"dir"`         // Directory for log files
+	Filename   string `yaml:"filename"`    // Log file name
+	MaxSize    int    `yaml:"max_size"`    // Max size in MB of a single log file before rotation (default 100)
+	MaxBackups int    `yaml:"max_backups"` // Max number of rotated log files to keep (default 10)
+}
+
+// Enabled reports whether file logging is enabled
+func (lc *LogConfig) Enabled() bool {
+	return lc.Dir != "" && lc.Filename != ""
+}
+
+// SetDefaults sets default values for log configuration
+func (lc *LogConfig) SetDefaults() {
+	if lc.MaxSize <= 0 {
+		lc.MaxSize = 100
+	}
+	if lc.MaxBackups <= 0 {
+		lc.MaxBackups = 10
+	}
+}
+
 // GlobalConfig represents the global application configuration
 type GlobalConfig struct {
 	Forward ForwardConfig `yaml:"forward"`
 	SSL     SSLConfig     `yaml:"ssl"` // Global SSL/TLS configuration
+	Log     LogConfig     `yaml:"log"` // Logging configuration
 }
 
 // Config represents the application configuration
@@ -129,6 +155,9 @@ func LoadConfig(filename string) (*Config, error) {
 
 	// Set defaults for forward configuration
 	config.Global.Forward.SetDefaults()
+
+	// Set defaults for log configuration
+	config.Global.Log.SetDefaults()
 
 	// Validate configuration
 	if len(config.Listeners) == 0 {

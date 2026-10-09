@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 func main() {
@@ -22,6 +25,18 @@ func main() {
 	config, err := LoadConfig(configFile)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	// Redirect logs to file if configured
+	if config.Global.Log.Enabled() {
+		logFile := filepath.Join(config.Global.Log.Dir, config.Global.Log.Filename)
+		log.SetOutput(&lumberjack.Logger{
+			Filename:   logFile,
+			MaxSize:    config.Global.Log.MaxSize,
+			MaxBackups: config.Global.Log.MaxBackups,
+		})
+		log.Printf("Logging to file: %s (max_size=%dMB, max_backups=%d)",
+			logFile, config.Global.Log.MaxSize, config.Global.Log.MaxBackups)
 	}
 
 	log.Printf("Loaded %d listeners", len(config.Listeners))
