@@ -1,167 +1,158 @@
 package main
 
 import (
-	"domain-dispatcher/pkg/forwarder"
+	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"strings"
+	"sync"
+	"syscall"
+
+	"domain-dispatcher/pkg/forwarder"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// Version and BuildTime are injected at build time via -ldflags.
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
+var (
+	configFile  = flag.String("config", "", "Path to config file (YAML), default config.yaml")
+	versionFlag = flag.Bool("version", false, "Print version and exit")
+)
+
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Printf("Usage: %s <config.yaml>\n", os.Args[0])
-		os.Exit(1)
+	flag.StringVar(configFile, "c", "", "Path to config file (YAML) (shorthand)")
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("domain-dispatcher %s (built %s)\n", Version, BuildTime)
+		return
 	}
 
-	configFile := os.Args[1]
+	configPath := *configFile
+	if configPath == "" {
+		configPath = "config.yaml"
+	}
 
 	// Load configuration
-	config, err := LoadConfig(configFile)
+	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+
 	// Redirect logs to file if configured
-	if config.Global.Log.Enabled() {
-		logFile := filepath.Join(config.Global.Log.Dir, config.Global.Log.Filename)
-		log.SetOutput(&lumberjack.Logger{
+	if cfg.Global.Log.Enabled() {
+		logFile := filepath.Join(cfg.Global.Log.Dir, cfg.Global.Log.Filename)
+		logger := &lumberjack.Logger{
 			Filename:   logFile,
-			MaxSize:    config.Global.Log.MaxSize,
-			MaxBackups: config.Global.Log.MaxBackups,
+			MaxSize:    cfg.Global.Log.MaxSize,
+			MaxBackups: cfg.Global.Log.MaxBackups,
+		}
+		// lumberjack reports open failures through Write and log.Logger discards
+		// write errors silently, so probe the target before switching output.
+		if _, err := logger.Write(nil); err != nil {
+			log.Printf("WARNING: cannot open log file %s: %v; logging to stderr", logFile, err)
+		} else {
+			log.SetOutput(logger)
+			log.Printf("Logging to file: %s (max_size=%dMB, max_backups=%d)",
+				logFile, cfg.Global.Log.MaxSize, cfg.Global.Log.MaxBackups)
+		}
+	}
+
+	log.Printf("Domain Dispatcher %s (built %s)", Version, BuildTime)
+	log.Printf("Loaded configuration from %s", configPath)
+	log.Printf("Loaded %d listeners", len(cfg.Listeners))
+
+	// Create the forwarding engine with the shared configuration. The engine
+	// strips the client Accept-Encoding so that a compressing upstream cannot
+	// buffer for example SSE streams.
+	engine := forwarder.New(cfg.Global.Forward.EngineConfig(cfg.Global.Forward.CompressionDisabled()))
+
+	// Build one HTTP server per listener
+	servers := make([]*http.Server, 0, len(cfg.Listeners))
+	for _, listener := range cfg.Listeners {
+		protoType := "HTTP"
+		if listener.Type == ListenerTypeHTTPS {
+			protoType = "HTTPS"
+		}
+		log.Printf("Starting %s domain dispatcher on port %d with %d rules", protoType, listener.Port, len(listener.Dispatch))
+
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			handleRequest(w, r, listener, engine, &cfg.Global)
 		})
-		log.Printf("Logging to file: %s (max_size=%dMB, max_backups=%d)",
-			logFile, config.Global.Log.MaxSize, config.Global.Log.MaxBackups)
+
+		servers = append(servers, &http.Server{
+			Addr:    fmt.Sprintf(":%d", listener.Port),
+			Handler: mux,
+			// No Read/Write timeout: request and response bodies may stream
+			// for as long as the upstream and the watchdogs allow.
+			ReadTimeout:       0,
+			WriteTimeout:      0,
+			IdleTimeout:       cfg.Global.Server.IdleTimeout,
+			ReadHeaderTimeout: cfg.Global.Server.ReadHeaderTimeout,
+			MaxHeaderBytes:    cfg.Global.Server.MaxHeaderBytes,
+		})
 	}
 
-	log.Printf("Loaded %d listeners", len(config.Listeners))
+	// Register the signal handler before starting the listeners so a signal
+	// arriving during startup still triggers a graceful shutdown.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Create forwarder with configuration
-	fwdConfig := forwarder.Config{
-		MaxIdleConns:          config.Global.Forward.MaxIdleConns,
-		MaxIdleConnsPerHost:   config.Global.Forward.MaxIdleConnsPerHost,
-		MaxConnsPerHost:       config.Global.Forward.MaxConnsPerHost,
-		IdleConnTimeout:       config.Global.Forward.IdleConnTimeout,
-		TLSHandshakeTimeout:   config.Global.Forward.TLSHandshakeTimeout,
-		ExpectContinueTimeout: config.Global.Forward.ExpectContinueTimeout,
-		ResponseHeaderTimeout: config.Global.Forward.ResponseHeaderTimeout,
-		DialTimeout:           config.Global.Forward.DialTimeout,
-		DialKeepAlive:         config.Global.Forward.DialKeepAlive,
-		RequestTimeout:        config.Global.Forward.RequestTimeout,
-		StreamIdleTimeout:     config.Global.Forward.StreamIdleTimeout,
-		ResponseBodyTimeout:   config.Global.Forward.ResponseBodyTimeout,
-		StreamingFlush:        config.Global.Forward.StreamingFlushEnabled(),
-		DisableCompression:    config.Global.Forward.CompressionDisabled(),
-		ForceAttemptHTTP2:     config.Global.Forward.ForceAttemptHTTP2,
-	}
-	fwd := forwarder.New(fwdConfig)
-
-	// Channel to capture errors from goroutines
-	errChan := make(chan error, len(config.Listeners))
-
-	for _, listener := range config.Listeners {
-		go func(l ListenerConfig, sslCert, sslKey string) {
-			protoType := "HTTP"
-			if l.Type == ListenerTypeHTTPS {
-				protoType = "HTTPS"
-			}
-			log.Printf("Starting %s domain dispatcher on port %d with %d rules", protoType, l.Port, len(l.Dispatch))
-
-			mux := http.NewServeMux()
-			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				handleRequest(w, r, l, fwd)
-			})
-
-			addr := fmt.Sprintf(":%d", l.Port)
-			log.Printf("Server listening on %s (%s)", addr, protoType)
-
+	// Start all listeners; a serve error is reported exactly once.
+	errCh := make(chan error, len(servers))
+	for i, listener := range cfg.Listeners {
+		go func(srv *http.Server, l ListenerConfig) {
 			var err error
 			if l.Type == ListenerTypeHTTPS {
-				err = http.ListenAndServeTLS(addr, sslCert, sslKey, mux)
+				err = srv.ListenAndServeTLS(cfg.Global.TLS.CertFile, cfg.Global.TLS.KeyFile)
 			} else {
-				err = http.ListenAndServe(addr, mux)
+				err = srv.ListenAndServe()
 			}
-			if err != nil {
-				errChan <- fmt.Errorf("server on port %d failed: %w", l.Port, err)
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("server on port %d failed: %w", l.Port, err)
 			}
-		}(listener, config.Global.SSL.CertFile, config.Global.SSL.KeyFile)
+		}(servers[i], listener)
 	}
 
-	// Wait for any server to fail
-	if err := <-errChan; err != nil {
-		log.Fatalf("Fatal error: %v", err)
-	}
-}
-
-func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConfig, fwd *forwarder.Forwarder) {
-	// Extract domain from Host header
-	host := r.Host
-	// Remove port if present
-	if colonIndex := strings.Index(host, ":"); colonIndex != -1 {
-		host = host[:colonIndex]
+	exitCode := 0
+	select {
+	case <-sigCh:
+		log.Println("Shutting down domain dispatcher...")
+	case serveErr := <-errCh:
+		log.Printf("Fatal error: %v", serveErr)
+		exitCode = 1
 	}
 
-	// Find dispatch rule
-	rule, found := listener.FindRule(host, r.URL.Path)
-	if !found {
-		log.Printf("[Port %d] No mapping found for domain: %s", listener.Port, host)
-		http.NotFound(w, r)
-		return
-	}
-
-	switch rule.Type {
-	case RuleTypeMock:
-		log.Printf("[Port %d] Mock response for %s (status=%d)", listener.Port, host, rule.MockStatus)
-		for k, v := range rule.MockHeaders {
-			w.Header().Set(k, v)
-		}
-		w.WriteHeader(rule.MockStatus)
-		if rule.MockBody != "" {
-			w.Write([]byte(rule.MockBody))
-		}
-	case RuleTypeRedirect:
-		targetURL, err := buildTargetURL(rule.ForwardTo, r)
-		if err != nil {
-			log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-		log.Printf("[Port %d] Redirecting %s to %s", listener.Port, host, targetURL)
-		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
-	case RuleTypeForward:
-		targetURL, err := buildTargetURL(rule.ForwardTo, r)
-		if err != nil {
-			log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
-			return
-		}
-		log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
-		if err := fwd.ForwardRequest(w, r, targetURL, rule.RemoveHeaders); err != nil {
-			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, err)
-			if !errors.Is(err, forwarder.ErrResponseStarted) {
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+	// Graceful shutdown: all listeners share a single timeout budget.
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Global.Server.ShutdownTimeout)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, srv := range servers {
+		wg.Add(1)
+		go func(srv *http.Server) {
+			defer wg.Done()
+			if err := srv.Shutdown(ctx); err != nil {
+				log.Printf("Error shutting down server on %s: %v", srv.Addr, err)
 			}
-		}
-	default:
-		log.Printf("[Port %d] Unknown rule type for %s: %s", listener.Port, host, rule.Type)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}(srv)
 	}
-}
+	wg.Wait()
 
-func buildTargetURL(target string, r *http.Request) (string, error) {
-	targetURL, err := url.Parse(target)
-	if err != nil {
-		return "", err
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
-
-	// Build the target URL with original path and query
-	targetURL.Path = r.URL.Path
-	targetURL.RawQuery = r.URL.RawQuery
-	return targetURL.String(), nil
+	log.Println("Server stopped")
 }

@@ -1,3 +1,6 @@
+// Package forwarder implements the shared HTTP forwarding engine used by both
+// domain-forwarder and domain-dispatcher. Keep this file byte-identical in both
+// repositories.
 package forwarder
 
 import (
@@ -26,8 +29,9 @@ var ErrStreamIdle = errors.New("stream idle")
 // transferring it took longer than Config.ResponseBodyTimeout.
 var ErrBodyTimeout = errors.New("response body timeout")
 
-// Config represents the configuration for forward mode
+// Config represents the configuration of the forwarding engine.
 type Config struct {
+	BufferSize            int
 	MaxIdleConns          int
 	MaxIdleConnsPerHost   int
 	MaxConnsPerHost       int
@@ -37,20 +41,23 @@ type Config struct {
 	ResponseHeaderTimeout time.Duration
 	DialTimeout           time.Duration
 	DialKeepAlive         time.Duration
-	RequestTimeout        time.Duration // max wait for upstream response headers; does not bound the response body
+	RequestTimeout        time.Duration // max wait for upstream response headers (incl. dial); does not bound the response body; 0 disables it
 	StreamIdleTimeout     time.Duration // abort a response body that sends no bytes for this long; 0 disables it
 	ResponseBodyTimeout   time.Duration // absolute cap on the non-streaming response body phase; 0 disables it
 	StreamingFlush        bool          // flush streaming (SSE) responses chunk by chunk
+	StripAcceptEncoding   bool          // drop the client's Accept-Encoding before forwarding (gateways that must not let the upstream compress)
 	DisableCompression    bool          // never negotiate compression with the upstream
 	ForceAttemptHTTP2     bool
 }
 
-// DefaultConfig returns the default forward configuration
+// DefaultConfig returns the canonical engine defaults. Both applications
+// prepopulate their YAML configuration with the same values.
 func DefaultConfig() Config {
 	return Config{
+		BufferSize:            32 * 1024,
 		MaxIdleConns:          1000,
 		MaxIdleConnsPerHost:   100,
-		MaxConnsPerHost:       100,
+		MaxConnsPerHost:       0,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
@@ -64,19 +71,58 @@ func DefaultConfig() Config {
 	}
 }
 
-// Forwarder handles HTTP request forwarding with configurable connection pooling
+// Result captures per-request statistics. Values are populated as far as known
+// even when the response has already started; pre-start failures leave the zero
+// value.
+type Result struct {
+	StatusCode int
+	ReqSize    int64
+	RespSize   int64
+	Duration   time.Duration
+}
+
+// BufferPool provides reusable copy buffers through a sync.Pool.
+type BufferPool struct {
+	pool sync.Pool
+}
+
+// NewBufferPool creates a buffer pool whose buffers have the given size.
+func NewBufferPool(size int) *BufferPool {
+	if size <= 0 {
+		size = 32 * 1024
+	}
+	return &BufferPool{
+		pool: sync.Pool{
+			New: func() any { return make([]byte, size) },
+		},
+	}
+}
+
+// Get returns a buffer from the pool.
+func (b *BufferPool) Get() []byte { return b.pool.Get().([]byte) }
+
+// Put returns a buffer to the pool.
+func (b *BufferPool) Put(buf []byte) { b.pool.Put(buf) }
+
+// Forwarder handles HTTP request forwarding with configurable connection pooling.
 type Forwarder struct {
 	config     Config
+	buffers    *BufferPool
 	httpClient *http.Client
 	once       sync.Once
 }
 
-// New creates a new Forwarder with the given configuration
+// New creates a new Forwarder with the given configuration.
 func New(config Config) *Forwarder {
 	return &Forwarder{
-		config: config,
+		config:  config,
+		buffers: NewBufferPool(config.BufferSize),
 	}
 }
+
+// Buffers returns the copy-buffer pool used by the engine so callers (e.g. a
+// CONNECT tunnel) can reuse the same buffers.
+func (f *Forwarder) Buffers() *BufferPool { return f.buffers }
 
 // getHTTPClient returns the HTTP client, initializing it on first call
 func (f *Forwarder) getHTTPClient() *http.Client {
@@ -118,17 +164,18 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 // aborts a body that stops delivering bytes, and Config.ResponseBodyTimeout additionally
 // caps how long a non-streaming body may take overall. Errors raised after the response
 // has started reaching the client wrap ErrResponseStarted.
-func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) error {
-	// Create new request with the original body
-	var bodyReader io.Reader = r.Body
-	if r.Body != nil {
-		bodyReader = r.Body
-	}
+func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) (result Result, err error) {
+	start := time.Now()
+	defer func() { result.Duration = time.Since(start) }()
+	result.ReqSize = r.ContentLength
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURLStr, bodyReader)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, targetURLStr, r.Body)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return result, fmt.Errorf("failed to create request: %w", err)
 	}
+	// Preserve the incoming Content-Length so the upstream request is not
+	// re-framed as chunked (-1 keeps the original unknown/chunked framing).
+	req.ContentLength = r.ContentLength
 
 	// Build a set of headers to remove for efficient lookup
 	headersToRemove := make(map[string]struct{}, len(removeHeaders))
@@ -142,11 +189,11 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 		if key == "Host" {
 			continue // Don't copy Host header
 		}
-		if key == "Accept-Encoding" && f.config.DisableCompression {
-			// Same reason as Transport.DisableCompression: if the client's
-			// encoding preference reached the upstream, a compressing gateway
-			// would buffer the SSE stream and deliver events in bursts.
-			// Identity responses are valid for every client.
+		if key == "Accept-Encoding" && f.config.StripAcceptEncoding {
+			// Gateways that must not let the upstream compress (a compressing
+			// gateway buffers the SSE stream and delivers events in bursts)
+			// drop the client's encoding preference. Identity responses are
+			// valid for every client.
 			continue
 		}
 		if _, shouldRemove := headersToRemove[key]; shouldRemove {
@@ -154,11 +201,12 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 		}
 		req.Header[key] = values
 	}
+	RemoveHopByHopHeaders(req.Header)
 
 	// Parse target URL to get host
 	u, err := url.Parse(targetURLStr)
 	if err != nil {
-		return fmt.Errorf("failed to parse target URL: %w", err)
+		return result, fmt.Errorf("failed to parse target URL: %w", err)
 	}
 	req.Host = u.Host
 
@@ -171,20 +219,27 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 
 	var abort atomic.Pointer[watchdog]
 
-	headerTimer := time.AfterFunc(f.config.RequestTimeout, cancel)
+	var headerTimer *time.Timer
+	if f.config.RequestTimeout > 0 {
+		headerTimer = time.AfterFunc(f.config.RequestTimeout, cancel)
+	}
 	resp, err := f.getHTTPClient().Do(req)
-	headerTimer.Stop()
+	if headerTimer != nil {
+		headerTimer.Stop()
+	}
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return result, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Copy response headers efficiently
+	// Copy response headers efficiently, dropping hop-by-hop headers first
+	RemoveHopByHopHeaders(resp.Header)
 	for key, values := range resp.Header {
 		w.Header()[key] = values
 	}
 
 	// Set status code
+	result.StatusCode = resp.StatusCode
 	w.WriteHeader(resp.StatusCode)
 
 	streaming := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
@@ -204,21 +259,23 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 	}
 
 	// Streaming responses are flushed chunk by chunk; everything else keeps the
-	// io.Copy fast path (splice/sendfile on Linux when possible).
+	// sendfile-capable io.Copy fast path (a pooled buffer does not disable it).
+	buf := f.buffers.Get()
+	defer f.buffers.Put(buf)
 	if streaming && f.config.StreamingFlush {
-		err = copyStreaming(w, body)
+		result.RespSize, err = copyStreaming(w, body, buf)
 	} else {
-		_, err = io.Copy(w, body)
+		result.RespSize, err = io.CopyBuffer(w, body, buf)
 	}
 	if err != nil {
 		// The cancellation came from our own watchdog, not from the client hanging up.
 		if wd := abort.Load(); wd != nil {
 			err = fmt.Errorf("%w after %s: %w", wd.err, wd.limit, err)
 		}
-		return fmt.Errorf("%w: failed to copy response body: %w", ErrResponseStarted, err)
+		return result, fmt.Errorf("%w: failed to copy response body: %w", ErrResponseStarted, err)
 	}
 
-	return nil
+	return result, nil
 }
 
 // watchdog records which body-phase limit aborted a response, so the resulting
@@ -257,24 +314,96 @@ func (p *idleResetReader) Read(buf []byte) (int, error) {
 // copyStreaming relays a streaming (SSE) response, flushing after every chunk.
 // Without the explicit flush the writes sit in net/http's 2 KiB pre-chunking
 // buffer, so events pile up and reach the client in bursts.
-func copyStreaming(w http.ResponseWriter, r io.Reader) error {
+func copyStreaming(w http.ResponseWriter, r io.Reader, buf []byte) (int64, error) {
 	rc := http.NewResponseController(w)
-	buf := make([]byte, 32*1024)
+	var written int64
 	for {
 		n, readErr := r.Read(buf)
 		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
-				return err
+			nw, err := w.Write(buf[:n])
+			written += int64(nw)
+			if err != nil {
+				return written, err
 			}
 			if err := rc.Flush(); err != nil {
-				return err
+				return written, err
 			}
 		}
 		if readErr == io.EOF {
-			return nil
+			return written, nil
 		}
 		if readErr != nil {
-			return readErr
+			return written, readErr
 		}
 	}
+}
+
+// Hop-by-hop headers must not be forwarded by a proxy (RFC 7230, section 6.1).
+var hopByHopHeaders = []string{
+	"Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailers",
+	"Transfer-Encoding",
+	"Upgrade",
+	"Proxy-Connection",
+}
+
+// RemoveHopByHopHeaders strips hop-by-hop headers, including the ones listed in
+// the Connection header, from h.
+func RemoveHopByHopHeaders(h http.Header) {
+	if c := h.Get("Connection"); c != "" {
+		for _, f := range strings.Split(c, ",") {
+			if f = strings.TrimSpace(f); f != "" {
+				h.Del(f)
+			}
+		}
+	}
+	for _, hdr := range hopByHopHeaders {
+		h.Del(hdr)
+	}
+}
+
+// AddForwardedHeaders appends the client address to X-Forwarded-For and sets
+// X-Forwarded-Proto / X-Forwarded-Host when absent. scheme is the scheme the
+// client used towards the proxy.
+func AddForwardedHeaders(r *http.Request, scheme string) {
+	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if prior := r.Header.Get("X-Forwarded-For"); prior != "" {
+			clientIP = prior + ", " + clientIP
+		}
+		r.Header.Set("X-Forwarded-For", clientIP)
+	}
+	if r.Header.Get("X-Forwarded-Proto") == "" {
+		r.Header.Set("X-Forwarded-Proto", scheme)
+	}
+	if r.Header.Get("X-Forwarded-Host") == "" {
+		r.Header.Set("X-Forwarded-Host", r.Host)
+	}
+}
+
+// IPBlacklisted reports whether the given IP address is covered by an entry of
+// the blacklist. Entries may be individual IPs or CIDR ranges.
+func IPBlacklisted(blacklist []string, ipStr string) bool {
+	if len(blacklist) == 0 {
+		return false
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+
+	for _, blocked := range blacklist {
+		if strings.Contains(blocked, "/") {
+			if _, ipNet, err := net.ParseCIDR(blocked); err == nil && ipNet.Contains(ip) {
+				return true
+			}
+		} else if blockedIP := net.ParseIP(blocked); blockedIP != nil && blockedIP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }

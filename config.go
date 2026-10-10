@@ -2,10 +2,13 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"domain-dispatcher/pkg/forwarder"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,14 +30,18 @@ const (
 	ListenerTypeHTTPS ListenerType = "https"
 )
 
-// SSLConfig represents the global SSL/TLS configuration
-type SSLConfig struct {
-	CertFile string `yaml:"cert_file"` // Path to SSL certificate file
-	KeyFile  string `yaml:"key_file"`  // Path to SSL private key file
+// TLSConfig represents the TLS certificate configuration used by https listeners.
+type TLSConfig struct {
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
 }
 
-// ForwardConfig represents the configuration for forward mode with default values
+// ForwardConfig represents the forwarding engine configuration. The plain
+// values are prepopulated with defaults before the YAML file is overlaid, so
+// explicitly configured zeros stay zero; the two *bool fields are tri-state
+// (unset = default via the accessors).
 type ForwardConfig struct {
+	BufferSize            int           `yaml:"buffer_size"`
 	MaxIdleConns          int           `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost   int           `yaml:"max_idle_conns_per_host"`
 	MaxConnsPerHost       int           `yaml:"max_conns_per_host"`
@@ -44,7 +51,7 @@ type ForwardConfig struct {
 	ResponseHeaderTimeout time.Duration `yaml:"response_header_timeout"`
 	DialTimeout           time.Duration `yaml:"dial_timeout"`
 	DialKeepAlive         time.Duration `yaml:"dial_keep_alive"`
-	RequestTimeout        time.Duration `yaml:"request_timeout"`       // Max wait for upstream response headers; does not limit response body transfer
+	RequestTimeout        time.Duration `yaml:"request_timeout"`       // Max wait for upstream response headers; does not limit response body transfer (0 = disabled)
 	StreamIdleTimeout     time.Duration `yaml:"stream_idle_timeout"`   // Abort the response body if the upstream sends no bytes for this long (0 = disabled)
 	ResponseBodyTimeout   time.Duration `yaml:"response_body_timeout"` // Total duration cap for a non-streaming response body (0 = disabled)
 	StreamingFlush        *bool         `yaml:"streaming_flush"`       // Flush streaming (SSE) responses chunk by chunk (default true)
@@ -53,8 +60,7 @@ type ForwardConfig struct {
 }
 
 // StreamingFlushEnabled reports whether streaming responses are relayed chunk by
-// chunk with an explicit flush after each chunk (default true). When disabled,
-// io.Copy's fast path is used for streaming responses as well.
+// chunk with an explicit flush after each chunk (default true).
 func (fc *ForwardConfig) StreamingFlushEnabled() bool {
 	return fc.StreamingFlush == nil || *fc.StreamingFlush
 }
@@ -66,40 +72,82 @@ func (fc *ForwardConfig) CompressionDisabled() bool {
 	return fc.DisableCompression == nil || *fc.DisableCompression
 }
 
-// SetDefaults sets default values for forward configuration
-func (fc *ForwardConfig) SetDefaults() {
-	if fc.MaxIdleConns <= 0 {
-		fc.MaxIdleConns = 1000
+// Validate checks the forward section for semantic errors.
+func (fc *ForwardConfig) Validate() error {
+	if fc.BufferSize <= 0 {
+		return fmt.Errorf("forward.buffer_size must be positive, got %d", fc.BufferSize)
 	}
-	if fc.MaxIdleConnsPerHost <= 0 {
-		fc.MaxIdleConnsPerHost = 100
+	if fc.MaxIdleConns < 0 || fc.MaxIdleConnsPerHost < 0 || fc.MaxConnsPerHost < 0 {
+		return fmt.Errorf("forward connection pool sizes must not be negative")
 	}
-	if fc.MaxConnsPerHost <= 0 {
-		fc.MaxConnsPerHost = 100
+	for _, d := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"idle_conn_timeout", fc.IdleConnTimeout},
+		{"tls_handshake_timeout", fc.TLSHandshakeTimeout},
+		{"expect_continue_timeout", fc.ExpectContinueTimeout},
+		{"response_header_timeout", fc.ResponseHeaderTimeout},
+		{"dial_timeout", fc.DialTimeout},
+		{"dial_keep_alive", fc.DialKeepAlive},
+		{"request_timeout", fc.RequestTimeout},
+		{"stream_idle_timeout", fc.StreamIdleTimeout},
+		{"response_body_timeout", fc.ResponseBodyTimeout},
+	} {
+		if d.value < 0 {
+			return fmt.Errorf("forward.%s must not be negative, got %s", d.name, d.value)
+		}
 	}
-	if fc.IdleConnTimeout <= 0 {
-		fc.IdleConnTimeout = 90 * time.Second
+	return nil
+}
+
+// EngineConfig converts the YAML forward section into the shared forwarding
+// engine configuration. stripAcceptEncoding drops the client's Accept-Encoding
+// before forwarding: gateways that must not let the upstream compress set it,
+// transparent forward proxies leave it false.
+func (fc *ForwardConfig) EngineConfig(stripAcceptEncoding bool) forwarder.Config {
+	return forwarder.Config{
+		BufferSize:            fc.BufferSize,
+		MaxIdleConns:          fc.MaxIdleConns,
+		MaxIdleConnsPerHost:   fc.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       fc.MaxConnsPerHost,
+		IdleConnTimeout:       fc.IdleConnTimeout,
+		TLSHandshakeTimeout:   fc.TLSHandshakeTimeout,
+		ExpectContinueTimeout: fc.ExpectContinueTimeout,
+		ResponseHeaderTimeout: fc.ResponseHeaderTimeout,
+		DialTimeout:           fc.DialTimeout,
+		DialKeepAlive:         fc.DialKeepAlive,
+		RequestTimeout:        fc.RequestTimeout,
+		StreamIdleTimeout:     fc.StreamIdleTimeout,
+		ResponseBodyTimeout:   fc.ResponseBodyTimeout,
+		StreamingFlush:        fc.StreamingFlushEnabled(),
+		StripAcceptEncoding:   stripAcceptEncoding,
+		DisableCompression:    fc.CompressionDisabled(),
+		ForceAttemptHTTP2:     fc.ForceAttemptHTTP2,
 	}
-	if fc.TLSHandshakeTimeout <= 0 {
-		fc.TLSHandshakeTimeout = 10 * time.Second
-	}
-	if fc.ExpectContinueTimeout <= 0 {
-		fc.ExpectContinueTimeout = 1 * time.Second
-	}
-	if fc.ResponseHeaderTimeout <= 0 {
-		fc.ResponseHeaderTimeout = 30 * time.Second
-	}
-	if fc.DialTimeout <= 0 {
-		fc.DialTimeout = 10 * time.Second
-	}
-	if fc.DialKeepAlive <= 0 {
-		fc.DialKeepAlive = 30 * time.Second
-	}
-	if fc.RequestTimeout <= 0 {
-		fc.RequestTimeout = 60 * time.Second
-	}
-	// stream_idle_timeout and response_body_timeout stay 0 (disabled) unless configured
-	// ForceAttemptHTTP2 defaults to true
+}
+
+// ServerConfig represents HTTP server settings applied to every listener.
+type ServerConfig struct {
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
+	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
+}
+
+// LogConfig represents the logging configuration.
+// When both Dir and Filename are set, all runtime logs are written to the file
+// with size-based rotation; otherwise logs go to stderr.
+type LogConfig struct {
+	Dir        string `yaml:"dir"`         // Directory for log files
+	Filename   string `yaml:"filename"`    // Log file name
+	MaxSize    int    `yaml:"max_size"`    // Max size in MB of a single log file before rotation
+	MaxBackups int    `yaml:"max_backups"` // Max number of rotated log files to keep
+}
+
+// Enabled reports whether file logging is enabled
+func (lc *LogConfig) Enabled() bool {
+	return lc.Dir != "" && lc.Filename != ""
 }
 
 // DispatchRule represents a single domain dispatch rule
@@ -122,36 +170,15 @@ type ListenerConfig struct {
 	Dispatch []DispatchRule `yaml:"dispatch"`
 }
 
-// LogConfig represents the logging configuration.
-// When both Dir and Filename are set, all runtime logs are written to the file
-// with size-based rotation.
-type LogConfig struct {
-	Dir        string `yaml:"dir"`         // Directory for log files
-	Filename   string `yaml:"filename"`    // Log file name
-	MaxSize    int    `yaml:"max_size"`    // Max size in MB of a single log file before rotation (default 100)
-	MaxBackups int    `yaml:"max_backups"` // Max number of rotated log files to keep (default 10)
-}
-
-// Enabled reports whether file logging is enabled
-func (lc *LogConfig) Enabled() bool {
-	return lc.Dir != "" && lc.Filename != ""
-}
-
-// SetDefaults sets default values for log configuration
-func (lc *LogConfig) SetDefaults() {
-	if lc.MaxSize <= 0 {
-		lc.MaxSize = 100
-	}
-	if lc.MaxBackups <= 0 {
-		lc.MaxBackups = 10
-	}
-}
-
 // GlobalConfig represents the global application configuration
 type GlobalConfig struct {
-	Forward ForwardConfig `yaml:"forward"`
-	SSL     SSLConfig     `yaml:"ssl"` // Global SSL/TLS configuration
-	Log     LogConfig     `yaml:"log"` // Logging configuration
+	Forward           ForwardConfig `yaml:"forward"`
+	Server            ServerConfig  `yaml:"server"`
+	TLS               TLSConfig     `yaml:"tls"`
+	Log               LogConfig     `yaml:"log"`
+	SourceIPBlacklist []string      `yaml:"source_ip_blacklist"`
+	AddProxyHeaders   bool          `yaml:"add_proxy_headers"` // Add X-Forwarded-For/Proto/Host when forwarding
+	Debug             bool          `yaml:"debug"`
 }
 
 // Config represents the application configuration
@@ -160,85 +187,162 @@ type Config struct {
 	Listeners []ListenerConfig `yaml:"listeners"`
 }
 
-// LoadConfig loads configuration from a YAML file
+// defaultForwardConfig returns the built-in forward section defaults. The
+// values mirror pkg/forwarder.DefaultConfig and the sibling project
+// domain-forwarder; keep all three in sync.
+func defaultForwardConfig() ForwardConfig {
+	return ForwardConfig{
+		BufferSize:            32 * 1024,
+		MaxIdleConns:          1000,
+		MaxIdleConnsPerHost:   100,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		DialTimeout:           10 * time.Second,
+		DialKeepAlive:         30 * time.Second,
+		RequestTimeout:        60 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+}
+
+// defaultConfig returns the full built-in defaults; the YAML file is overlaid
+// on top, so values omitted there keep these defaults.
+func defaultConfig() *Config {
+	return &Config{
+		Global: GlobalConfig{
+			Forward: defaultForwardConfig(),
+			Server: ServerConfig{
+				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       120 * time.Second,
+				MaxHeaderBytes:    1 << 20,
+				ShutdownTimeout:   30 * time.Second,
+			},
+			Log:             LogConfig{MaxSize: 100, MaxBackups: 10},
+			AddProxyHeaders: true,
+		},
+	}
+}
+
+// LoadConfig loads configuration from a YAML file, overlaying it on the built-in
+// defaults and validating the result.
 func LoadConfig(filename string) (*Config, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	var config Config
-	if err := yaml.Unmarshal(data, &config); err != nil {
+	cfg := defaultConfig()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Set defaults for forward configuration
-	config.Global.Forward.SetDefaults()
+	normalize(cfg)
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
-	// Set defaults for log configuration
-	config.Global.Log.SetDefaults()
+// normalize fills per-slice defaults that whole-struct defaults cannot express.
+func normalize(cfg *Config) {
+	for i := range cfg.Listeners {
+		listener := &cfg.Listeners[i]
+		if listener.Type == "" {
+			listener.Type = ListenerTypeHTTP
+		}
+		for j := range listener.Dispatch {
+			rule := &listener.Dispatch[j]
+			if rule.Type == "" {
+				rule.Type = RuleTypeForward
+			}
+			if rule.Type == RuleTypeMock && rule.MockStatus == 0 {
+				rule.MockStatus = http.StatusOK
+			}
+		}
+	}
+}
 
-	// Validate configuration
-	if len(config.Listeners) == 0 {
-		return nil, fmt.Errorf("no listeners configured")
+// Validate checks the configuration for semantic errors.
+func (cfg *Config) Validate() error {
+	if len(cfg.Listeners) == 0 {
+		return fmt.Errorf("no listeners configured")
 	}
 
-	for i, listener := range config.Listeners {
+	if err := cfg.Global.Forward.Validate(); err != nil {
+		return err
+	}
+
+	if cfg.Global.Server.MaxHeaderBytes <= 0 {
+		return fmt.Errorf("global.server.max_header_bytes must be positive, got %d", cfg.Global.Server.MaxHeaderBytes)
+	}
+	if cfg.Global.Server.ReadHeaderTimeout < 0 || cfg.Global.Server.IdleTimeout < 0 || cfg.Global.Server.ShutdownTimeout < 0 {
+		return fmt.Errorf("global.server timeouts must not be negative")
+	}
+
+	for _, entry := range cfg.Global.SourceIPBlacklist {
+		if err := validateBlacklistEntry(entry); err != nil {
+			return fmt.Errorf("global.source_ip_blacklist: %w", err)
+		}
+	}
+
+	for i, listener := range cfg.Listeners {
 		if listener.Port <= 0 || listener.Port > 65535 {
-			return nil, fmt.Errorf("listener %d: invalid port: %d (must be between 1 and 65535)", i+1, listener.Port)
+			return fmt.Errorf("listener %d: invalid port: %d (must be between 1 and 65535)", i+1, listener.Port)
 		}
 
-		// Default to http if type is not set or empty
-		if listener.Type == "" {
-			config.Listeners[i].Type = ListenerTypeHTTP
-		} else if listener.Type != ListenerTypeHTTP && listener.Type != ListenerTypeHTTPS {
-			return nil, fmt.Errorf("listener %d: invalid type: %s (must be 'http' or 'https')", i+1, listener.Type)
+		if listener.Type != ListenerTypeHTTP && listener.Type != ListenerTypeHTTPS {
+			return fmt.Errorf("listener %d: invalid type: %s (must be 'http' or 'https')", i+1, listener.Type)
 		}
 
-		// Validate SSL configuration for https listeners
+		// Validate TLS configuration for https listeners
 		if listener.Type == ListenerTypeHTTPS {
-			if config.Global.SSL.CertFile == "" {
-				return nil, fmt.Errorf("listener %d: ssl.cert_file is required for https listener", i+1)
+			if cfg.Global.TLS.CertFile == "" {
+				return fmt.Errorf("listener %d: tls.cert_file is required for https listener", i+1)
 			}
-			if config.Global.SSL.KeyFile == "" {
-				return nil, fmt.Errorf("listener %d: ssl.key_file is required for https listener", i+1)
+			if cfg.Global.TLS.KeyFile == "" {
+				return fmt.Errorf("listener %d: tls.key_file is required for https listener", i+1)
 			}
-			// Check if cert file exists
-			if _, err := os.Stat(config.Global.SSL.CertFile); os.IsNotExist(err) {
-				return nil, fmt.Errorf("listener %d: ssl cert file not found: %s", i+1, config.Global.SSL.CertFile)
+			if _, err := os.Stat(cfg.Global.TLS.CertFile); os.IsNotExist(err) {
+				return fmt.Errorf("listener %d: tls cert file not found: %s", i+1, cfg.Global.TLS.CertFile)
 			}
-			// Check if key file exists
-			if _, err := os.Stat(config.Global.SSL.KeyFile); os.IsNotExist(err) {
-				return nil, fmt.Errorf("listener %d: ssl key file not found: %s", i+1, config.Global.SSL.KeyFile)
+			if _, err := os.Stat(cfg.Global.TLS.KeyFile); os.IsNotExist(err) {
+				return fmt.Errorf("listener %d: tls key file not found: %s", i+1, cfg.Global.TLS.KeyFile)
 			}
 		}
 
 		if len(listener.Dispatch) == 0 {
-			return nil, fmt.Errorf("listener %d: no dispatch rules configured", i+1)
+			return fmt.Errorf("listener %d: no dispatch rules configured", i+1)
 		}
 
 		for j, rule := range listener.Dispatch {
-			// Default to forward if type is not set or empty
-			if rule.Type == "" {
-				config.Listeners[i].Dispatch[j].Type = RuleTypeForward
-			} else if rule.Type != RuleTypeForward && rule.Type != RuleTypeRedirect && rule.Type != RuleTypeMock {
-				return nil, fmt.Errorf("listener %d, rule %d: invalid type: %s (must be 'forward', 'redirect' or 'mock')", i+1, j+1, rule.Type)
+			if rule.Type != RuleTypeForward && rule.Type != RuleTypeRedirect && rule.Type != RuleTypeMock {
+				return fmt.Errorf("listener %d, rule %d: invalid type: %s (must be 'forward', 'redirect' or 'mock')", i+1, j+1, rule.Type)
 			}
-
 			// forward_to is not required for mock rules
 			if rule.Type != RuleTypeMock && rule.ForwardTo == "" {
-				return nil, fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
-			}
-
-			if rule.Type == RuleTypeMock {
-				if config.Listeners[i].Dispatch[j].MockStatus == 0 {
-					config.Listeners[i].Dispatch[j].MockStatus = http.StatusOK
-				}
+				return fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
 			}
 		}
 	}
 
-	return &config, nil
+	return nil
+}
+
+// validateBlacklistEntry checks a single source_ip_blacklist entry, which may be
+// an individual IP or a CIDR range.
+func validateBlacklistEntry(entry string) error {
+	if strings.Contains(entry, "/") {
+		if _, _, err := net.ParseCIDR(entry); err != nil {
+			return fmt.Errorf("invalid CIDR range %q", entry)
+		}
+		return nil
+	}
+	if net.ParseIP(entry) == nil {
+		return fmt.Errorf("invalid IP address %q", entry)
+	}
+	return nil
 }
 
 // FindRule finds the best matching dispatch rule for a given domain and request path.

@@ -1,120 +1,156 @@
-# Deployment Guide
+# Domain Dispatcher Deployment Guide
 
-This guide explains how to deploy the Domain Dispatcher to a Linux environment and configure it as a systemd service.
+This document describes deploying Domain Dispatcher as a systemd service on
+Linux systems.
 
-## Overview
+## Table of Contents
 
-Domain Dispatcher is a lightweight Go application that routes HTTP requests based on the Host header to different backend services. It supports both forwarding (proxy) and redirect rules.
+- [Building Binaries](#building-binaries)
+- [Linux Service Deployment](#linux-service-deployment)
+  - [Method 1: Manual Deployment](#method-1-manual-deployment)
+  - [Method 2: Using Installation Script](#method-2-using-installation-script)
+- [Service Management](#service-management)
+- [Log Viewing](#log-viewing)
+- [Troubleshooting](#troubleshooting)
+- [Uninstallation](#uninstallation)
 
-## Prerequisites
+---
 
-- Linux server (Ubuntu 20.04+, CentOS 7+, Debian 10+, or similar)
-- Root or sudo access
-- Go 1.21+ (only needed if building from source)
+## Building Binaries
 
-## Deployment Steps
-
-### 1. Build the Binary
-
-Build the Linux binary on your development machine or on the target server:
+Run the following in the project root to build for each platform:
 
 ```bash
-# Clone or navigate to the project directory
-cd domain-dispatcher
-
-# Build for Linux AMD64
+# Build Linux (amd64) version
 make build-linux
 
-# Or build manually
-go build -o dist/domain-dispatcher-linux-amd64
+# Build Linux (arm64) version
+make build-linux-arm64
+
+# Build macOS (Intel) version
+make build-macos
+
+# Build macOS (Apple Silicon) version
+make build-macos-arm64
+
+# Build Windows version
+make build-windows
+
+# Build all platform versions at once
+make build-all
+
+# Build and package release archives
+make release
 ```
 
-The binary will be created at `dist/domain-dispatcher-linux-amd64`.
+Build output locations:
 
-### 2. Prepare the Server
+- Platform binaries: `dist/<platform>-<arch>/domain-dispatcher` (each directory also contains `config.yaml`)
+- Release archives: `dist/domain-dispatcher-<version>-<platform>-<arch>.tar.gz` (zip for Windows)
 
-On your Linux server, create the necessary directories and user:
+---
+
+## Linux Service Deployment
+
+### Method 1: Manual Deployment
+
+#### 1. Prepare Binary Files
 
 ```bash
-# Create system user (no login, no home directory)
-sudo useradd -r -s /bin/false domain-dispatcher
+# Build Linux version
+make build-linux
 
-# Create directories
+# Or extract from a release package
+tar -xzf domain-dispatcher-v1.0.0-linux-amd64.tar.gz
+```
+
+#### 2. Create System User
+
+For security reasons, run the service as a dedicated system user:
+
+```bash
+# Create system user (no login permission, no home directory)
+sudo useradd -r -s /bin/false -M domain-dispatcher
+```
+
+#### 3. Install Files to System Directories
+
+```bash
+# Create installation directories
 sudo mkdir -p /opt/domain-dispatcher
 sudo mkdir -p /etc/domain-dispatcher
 sudo mkdir -p /var/log/domain-dispatcher
 
-# Set ownership
-sudo chown domain-dispatcher:domain-dispatcher /opt/domain-dispatcher
-sudo chown domain-dispatcher:domain-dispatcher /var/log/domain-dispatcher
-```
-
-### 3. Deploy Files
-
-Copy the binary and configuration to the server:
-
-```bash
 # Copy binary
-sudo cp dist/domain-dispatcher-linux-amd64 /opt/domain-dispatcher/domain-dispatcher
-sudo chmod +x /opt/domain-dispatcher/domain-dispatcher
+sudo cp dist/linux-amd64/domain-dispatcher /opt/domain-dispatcher/
 
-# Copy and edit configuration
-sudo cp config.yaml.sample /etc/domain-dispatcher/config.yaml
-sudo chmod 644 /etc/domain-dispatcher/config.yaml
-
-# Set ownership
-sudo chown -R domain-dispatcher:domain-dispatcher /opt/domain-dispatcher
-sudo chown root:root /etc/domain-dispatcher/config.yaml
-```
-
-### 4. Configure the Application
-
-Edit the configuration file at `/etc/domain-dispatcher/config.yaml`:
-
-```bash
+# Install the configuration template and edit it
+sudo cp config.example.yaml /etc/domain-dispatcher/config.yaml
 sudo nano /etc/domain-dispatcher/config.yaml
+
+# Set permissions
+sudo chmod +x /opt/domain-dispatcher/domain-dispatcher
+sudo chmod 644 /etc/domain-dispatcher/config.yaml
+sudo chown -R domain-dispatcher:domain-dispatcher /opt/domain-dispatcher
+sudo chown -R domain-dispatcher:domain-dispatcher /var/log/domain-dispatcher
 ```
 
-Example configuration:
+#### 4. Configuration File Adjustment
+
+The configuration is overlaid on built-in defaults, so `/etc/domain-dispatcher/config.yaml`
+only needs the values you want to change. A typical production config:
 
 ```yaml
-- port: 8080
-  dispatch:
-    - domain: api.example.com
-      forward_to: http://localhost:3000
-      type: forward
-    - domain: old.example.com
-      forward_to: https://new.example.com
-      type: redirect
-- port: 8081
-  dispatch:
-    - domain: admin.example.com
-      forward_to: http://localhost:3001
-      type: forward
+global:
+  forward:
+    request_timeout: 60s
+    stream_idle_timeout: 120s
+    response_body_timeout: 300s
+  server:
+    shutdown_timeout: 30s
+  tls:                               # required only for https listeners
+    cert_file: /etc/domain-dispatcher/server.crt
+    key_file: /etc/domain-dispatcher/server.key
+  log:
+    dir: /var/log/domain-dispatcher
+    filename: app.log
+    max_size: 100
+    max_backups: 10
+  source_ip_blacklist: []
+  add_proxy_headers: true
+  debug: false
+
+listeners:
+  - port: 8080
+    type: http
+    dispatch:
+      - domain: api.example.com
+        forward_to: http://localhost:3000
+      - domain: old.example.com
+        forward_to: https://new.example.com
+        type: redirect
+      - domain: health.example.com
+        type: mock
+        mock_status: 200
+        mock_headers:
+          Content-Type: application/json
+        mock_body: '{"status":"ok"}'
 ```
 
-**Configuration fields:**
-- `port`: The port to listen on
-- `domain`: The domain to match (from Host header)
-- `forward_to`: Target URL
-- `type`: Either `forward` (proxy) or `redirect` (HTTP 302)
+Configuration errors (unknown timings, a missing certificate for an `https`
+listener, an invalid blacklist entry, a bad port) make the process exit with
+code 1 and a precise error message — check `journalctl` after editing.
 
-### 5. Create Systemd Service
+#### 5. Create systemd Service File
 
-Create the systemd service file:
-
-```bash
-sudo nano /etc/systemd/system/domain-dispatcher.service
-```
-
-Add the following content:
+Create `/etc/systemd/system/domain-dispatcher.service`:
 
 ```ini
 [Unit]
-Description=Domain Dispatcher - HTTP Request Router
-Documentation=https://github.com/yourusername/domain-dispatcher
-After=network.target
-Wants=network.target
+Description=Domain Dispatcher HTTP Request Router
+Documentation=https://github.com/freyrlin/domain-dispatcher
+After=network.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -125,24 +161,22 @@ Group=domain-dispatcher
 WorkingDirectory=/opt/domain-dispatcher
 
 # Binary and config path
-ExecStart=/opt/domain-dispatcher/domain-dispatcher /etc/domain-dispatcher/config.yaml
+ExecStart=/opt/domain-dispatcher/domain-dispatcher -c /etc/domain-dispatcher/config.yaml
 
 # Restart policy
 Restart=on-failure
-RestartSec=5
+RestartSec=5s
 
 # Resource limits
 LimitNOFILE=65536
+LimitNPROC=4096
 
 # Security hardening
 NoNewPrivileges=true
+PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/log/domain-dispatcher
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 
 # Logging
 StandardOutput=journal
@@ -153,148 +187,114 @@ SyslogIdentifier=domain-dispatcher
 WantedBy=multi-user.target
 ```
 
-### 6. Start the Service
-
-Reload systemd and start the service:
+#### 6. Enable and Start Service
 
 ```bash
-# Reload systemd daemon
 sudo systemctl daemon-reload
-
-# Enable service to start on boot
 sudo systemctl enable domain-dispatcher
-
-# Start the service
 sudo systemctl start domain-dispatcher
-
-# Check status
 sudo systemctl status domain-dispatcher
 ```
 
-### 7. Verify Deployment
+---
 
-Check that the service is running:
+### Method 2: Using Installation Script
+
+The project provides `scripts/install.sh`, which creates the service user and
+directories, copies the binary, installs `config.example.yaml` as
+`/etc/domain-dispatcher/config.yaml` (kept if it already exists), and installs
+the systemd unit shown above:
 
 ```bash
-# View logs
-sudo journalctl -u domain-dispatcher -f
+# Build the Linux binary first
+make build-linux
 
-# Test the endpoint
-curl -H "Host: api.example.com" http://localhost:8080/
+# Run the installer
+sudo ./scripts/install.sh
 ```
 
-## Managing the Service
-
-### Start/Stop/Restart
+Afterwards edit `/etc/domain-dispatcher/config.yaml` and restart:
 
 ```bash
-# Start
+sudo systemctl restart domain-dispatcher
+```
+
+---
+
+## Service Management
+
+```bash
+# Start / stop / restart
 sudo systemctl start domain-dispatcher
-
-# Stop
 sudo systemctl stop domain-dispatcher
-
-# Restart
 sudo systemctl restart domain-dispatcher
 
-# Reload configuration (requires restart)
+# Status and boot behaviour
+sudo systemctl status domain-dispatcher
+sudo systemctl enable domain-dispatcher
+sudo systemctl disable domain-dispatcher
+```
+
+Configuration changes are applied by restarting the service (there is no hot
+reload):
+
+```bash
+sudo vim /etc/domain-dispatcher/config.yaml
 sudo systemctl restart domain-dispatcher
 ```
 
-### View Logs
+---
+
+## Log Viewing
+
+The service logs to journald by default. Log rotation is handled by journald;
+alternatively enable file logging via `global.log` (with `dir` and `filename`),
+which uses lumberjack size-based rotation.
 
 ```bash
-# View all logs
-sudo journalctl -u domain-dispatcher
-
-# Follow logs in real-time
+# Follow logs in real time
 sudo journalctl -u domain-dispatcher -f
 
-# View logs since last boot
-sudo journalctl -u domain-dispatcher --since today
+# Last 100 lines
+sudo journalctl -u domain-dispatcher -n 100
 
-# View logs with specific time range
+# Since a point in time
 sudo journalctl -u domain-dispatcher --since "1 hour ago"
 ```
 
-### Update Configuration
+Every request prints one summary line:
 
-After modifying `/etc/domain-dispatcher/config.yaml`:
-
-```bash
-# Validate configuration syntax
-sudo /opt/domain-dispatcher/domain-dispatcher /etc/domain-dispatcher/config.yaml --dry-run
-
-# Restart service to apply changes
-sudo systemctl restart domain-dispatcher
-
-# Verify new configuration is active
-sudo systemctl status domain-dispatcher
+```
+[METHOD] source=<ip:port> target=<url> req_size=<n> resp_status=<code> resp_size=<n> duration=<d>
 ```
 
-## Firewall Configuration
+Set `global.debug: true` for additional per-rule detail lines.
 
-If using a firewall, open the required ports:
-
-```bash
-# Using ufw (Ubuntu/Debian)
-sudo ufw allow 8080/tcp
-sudo ufw allow 8081/tcp
-
-# Using firewalld (CentOS/RHEL)
-sudo firewall-cmd --permanent --add-port=8080/tcp
-sudo firewall-cmd --permanent --add-port=8081/tcp
-sudo firewall-cmd --reload
-
-# Using iptables
-sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 8081 -j ACCEPT
-```
-
-## Reverse Proxy Setup (Optional)
-
-For production use, place Domain Dispatcher behind a reverse proxy like Nginx:
-
-```nginx
-server {
-    listen 80;
-    server_name api.example.com;
-
-    location / {
-        proxy_pass http://localhost:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+---
 
 ## Troubleshooting
 
 ### Service fails to start
 
 ```bash
-# Check detailed error message
-sudo journalctl -u domain-dispatcher -n 50
+sudo systemctl status domain-dispatcher
+sudo journalctl -u domain-dispatcher -n 50 --no-pager
+```
 
-# Check configuration syntax
-sudo /opt/domain-dispatcher/domain-dispatcher /etc/domain-dispatcher/config.yaml
+The startup log points at the exact problem: missing/invalid config file,
+`no listeners configured`, an invalid port or dispatch rule type, a missing
+TLS certificate for an `https` listener, an invalid blacklist entry, or a port
+already in use. Run the binary manually to see the error directly:
 
-# Verify file permissions
-ls -la /opt/domain-dispatcher/
-ls -la /etc/domain-dispatcher/
+```bash
+/opt/domain-dispatcher/domain-dispatcher -c /etc/domain-dispatcher/config.yaml
 ```
 
 ### Permission denied errors
 
 ```bash
-# Fix ownership
 sudo chown -R domain-dispatcher:domain-dispatcher /opt/domain-dispatcher
-sudo chown domain-dispatcher:domain-dispatcher /etc/domain-dispatcher/config.yaml
 sudo chown domain-dispatcher:domain-dispatcher /var/log/domain-dispatcher
-
-# Fix permissions
 sudo chmod 755 /opt/domain-dispatcher
 sudo chmod 644 /etc/domain-dispatcher/config.yaml
 ```
@@ -302,30 +302,56 @@ sudo chmod 644 /etc/domain-dispatcher/config.yaml
 ### Port already in use
 
 ```bash
-# Find process using the port
+sudo ss -tlnp | grep 8080
 sudo lsof -i :8080
-
-# Kill the process or change the port in config.yaml
 ```
+
+Change the listener `port` in the configuration or stop the conflicting process.
+
+### Firewall
+
+Open the configured listener ports:
+
+```bash
+# ufw (Ubuntu/Debian)
+sudo ufw allow 8080/tcp
+
+# firewalld (CentOS/RHEL)
+sudo firewall-cmd --permanent --add-port=8080/tcp
+sudo firewall-cmd --reload
+
+# iptables
+sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+```
+
+---
 
 ## Uninstallation
 
+Using the script (prompts before removing config, logs and the system user):
+
 ```bash
-# Stop and disable service
+sudo ./scripts/uninstall.sh
+```
+
+Manual removal:
+
+```bash
+# Stop and disable the service
 sudo systemctl stop domain-dispatcher
 sudo systemctl disable domain-dispatcher
+
+# Remove the service file and reload systemd
+sudo rm /etc/systemd/system/domain-dispatcher.service
+sudo systemctl daemon-reload
 
 # Remove files
 sudo rm -rf /opt/domain-dispatcher
 sudo rm -rf /etc/domain-dispatcher
 sudo rm -rf /var/log/domain-dispatcher
-sudo rm /etc/systemd/system/domain-dispatcher.service
 
-# Remove user
+# Remove the system user
 sudo userdel domain-dispatcher
-
-# Reload systemd
-sudo systemctl daemon-reload
 ```
 
 ## File Locations Summary
@@ -334,5 +360,10 @@ sudo systemctl daemon-reload
 |----------------|---------|
 | `/opt/domain-dispatcher/domain-dispatcher` | Binary executable |
 | `/etc/domain-dispatcher/config.yaml` | Configuration file |
-| `/var/log/domain-dispatcher/` | Log directory (if file logging enabled) |
+| `/var/log/domain-dispatcher/` | Log directory (when file logging is enabled) |
 | `/etc/systemd/system/domain-dispatcher.service` | Systemd service file |
+
+## References
+
+- [systemd Service Management Documentation](https://www.freedesktop.org/software/systemd/man/systemd.service.html)
+- [journalctl Log Management](https://www.freedesktop.org/software/systemd/man/journalctl.html)
