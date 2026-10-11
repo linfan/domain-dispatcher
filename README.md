@@ -1,81 +1,86 @@
 # Domain Dispatcher
 
-A Go HTTP request router that listens on one or more ports and dispatches
-requests by the `Host` header: reverse-proxy (`forward`), HTTP 302 redirect
-(`redirect`) or a local canned response (`mock`).
+[English](README_EN.md)
 
-The forwarding engine and its configuration parameters are shared with the
-sibling project `domain-forwarder`: identical parameter names, defaults and
-streaming/timeout behavior.
+使用 Go 编写的 HTTP/HTTPS 请求路由器：监听一个或多个端口，依据请求的 `Host` 头分发流量，
+支持反向代理（`forward`）、HTTP 302 重定向（`redirect`）和本地预设响应（`mock`）三种方式。
 
-## Features
+构建、跨平台发布包以及 Linux/systemd 部署方式请参见 [DEPLOY.md](DEPLOY.md)。
 
-- **Domain-based routing**: Match the `Host` header exactly, with `*` as a wildcard fallback
-- **Path matching**: Optional `path` filter per rule, exact (`/health`) or prefix wildcard (`/api/*`)
-- **Manual rule priority**: `priority` adds to the automatic match score to order overlapping rules
-- **Multiple dispatch types**: `forward` (reverse proxy), `redirect` (302), `mock` (local canned response)
-- **Header control**: Remove configured headers before forwarding; optionally add `X-Forwarded-*`
-- **SSE-aware forwarding**: Streaming responses are flushed chunk by chunk and the upstream never negotiates compression, so events are delivered immediately instead of in bursts
-- **Timeouts**: Upstream dial/header/body-idle/body-duration and server read-header/idle timeouts are all configurable
-- **HTTP and HTTPS listeners**: HTTPS uses the global certificate configuration
-- **Source IP blacklist**: Reject individual IPs or CIDR ranges with 403
-- **Graceful shutdown**: SIGINT/SIGTERM stops accepting connections and drains in-flight requests within `server.shutdown_timeout`
-- **Per-request summary log**: One line for every request (forward, redirect, mock and 404)
-- **Optional file logging**: Size-based rotation via `global.log`
-- **YAML configuration**: Multiple listeners, each with its own rule set
+## 功能特性
 
-## Quick Start
+- **按域名路由**：精确匹配 `Host` 头，并支持用 `*` 作为通配兜底规则
+- **路径匹配**：每条规则可选 `path` 过滤，支持精确匹配（`/health`）或前缀通配（`/api/*`）
+- **手动规则优先级**：`priority` 会叠加到自动匹配得分上，用于排定相互重叠的规则
+- **多种分发类型**：`forward`（反向代理）、`redirect`（302 重定向）、`mock`（本地预设响应）
+- **请求头控制**：转发前移除指定请求头；可选添加 `X-Forwarded-*`
+- **适配 SSE 的转发**：流式响应逐块 flush 输出，且不与上游协商压缩，因此事件即时送达、不会成批堆积
+- **超时配置**：上游拨号、响应头、正文空闲、正文总时长，以及服务端读请求头、空闲超时可全部配置
+- **HTTP 与 HTTPS 监听**：HTTPS 使用全局证书配置
+- **来源 IP 黑名单**：以 403 拒绝指定 IP 或 CIDR 网段
+- **优雅关闭**：收到 SIGINT/SIGTERM 后停止接受新连接，并在 `server.shutdown_timeout` 内处理完在途请求
+- **每请求摘要日志**：每个请求（forward、redirect、mock 以及 404）都输出一行摘要
+- **可选文件日志**：通过 `global.log` 按文件大小滚动
+- **YAML 配置**：可配置多个监听端口，每个监听器拥有各自的规则集
+
+## 快速开始
 
 ```bash
-# Build for the current platform
+# 为当前平台构建
 make build
 
-# Create your local config from the tracked template (config.yaml is gitignored)
+# 基于纳入版本管理的模板创建本地配置（config.yaml 已被 gitignore）
 cp config.example.yaml config.yaml
 
-# Run with the local config (default path when -c is omitted)
+# 使用本地配置启动（省略 -c 时的默认路径）
 ./build/domain-dispatcher -c config.yaml
 ```
 
-Map a test domain to your machine (e.g. in `/etc/hosts`):
+把测试域名指向本机（例如在 `/etc/hosts` 中添加）：
 
 ```
 127.0.0.1 abc-api.com
 ```
 
-Then:
+然后即可通过分发器转发请求（替换 `-H "Host: ..."` 的值即可验证不同规则）：
 
 ```bash
+# forward 规则
 curl -H "Host: abc-api.com" http://127.0.0.1:8080/hello
+
+# mock 规则
+curl -H "Host: mock-api.com" http://127.0.0.1:8080/health
+
+# 未匹配的域名 -> 404
+curl -H "Host: unknown.com" http://127.0.0.1:8080/
 ```
 
-## Command-line Options
+## 命令行选项
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-c, --config` | `config.yaml` | Path to the YAML config file (create from `config.example.yaml`) |
-| `--version` | - | Print version and build time, then exit |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-c, --config` | `config.yaml` | YAML 配置文件路径（可从 `config.example.yaml` 复制创建） |
+| `--version` | - | 打印版本号与构建时间后退出 |
 
-Exit codes: `0` after a graceful SIGINT/SIGTERM shutdown, `1` when a listener
-fails or the configuration is invalid.
+退出码：收到 SIGINT/SIGTERM 并优雅关闭后为 `0`；监听器启动失败或配置非法时为 `1`。
 
-## Configuration
+## 配置
 
-See `config.example.yaml` for the fully annotated reference. Every value shown there is
-the built-in default, so an omitted key keeps its default. A minimal example:
+完整且带注释的配置说明请见 `config.example.yaml`。其中给出的每个值都是内置默认值，
+因此省略某个键即沿用其默认配置。最小示例：
 
 ```yaml
 global:
   forward:
-    request_timeout: 60s             # max wait for upstream response headers
-    stream_idle_timeout: 120s        # abort a body that stalls this long (0s = off)
-    response_body_timeout: 300s      # total cap for non-streaming bodies (0s = off)
+    request_timeout: 60s             # 等待上游响应头的最长时间
+    stream_idle_timeout: 120s        # 正文停滞达到该时长即中断（0s 表示关闭）
+    response_body_timeout: 300s      # 非流式正文的总时长上限（0s 表示关闭）
   server:
     shutdown_timeout: 30s
   tls:
     cert_file: /path/to/server.crt
     key_file: /path/to/server.key
-  log:                               # optional; omit for stderr
+  log:                               # 可选；不配置则输出到 stderr
     dir: /var/log/domain-dispatcher
     filename: app.log
   add_proxy_headers: true
@@ -91,12 +96,12 @@ listeners:
       - domain: abc-api.com
         forward_to: https://abc.com/api
       - domain: xyz-api.com
-        path: /api/*                 # only requests under /api/
+        path: /api/*                 # 仅匹配 /api/ 下的请求
         forward_to: https://xyz.com/backend
       - domain: mock-api.com
         path: /health
-        type: mock                   # local response, no upstream
-        priority: 100                # raise above the automatic match score
+        type: mock                   # 本地响应，不回源
+        priority: 100                # 在自动匹配得分之上加权
         mock_status: 200
         mock_headers:
           Content-Type: application/json
@@ -106,128 +111,73 @@ listeners:
         type: redirect
 ```
 
-### Configuration Fields
+### 配置字段说明
 
-- `global.forward`: Shared forwarding-engine parameters (connection pool,
-  dial/TLS timeouts, `request_timeout`, `stream_idle_timeout`,
-  `response_body_timeout`, `streaming_flush`, `disable_compression`,
-  `force_attempt_http2`, `buffer_size`) — same names and defaults as
-  `domain-forwarder`
-- `global.server`: HTTP server settings applied to every listener
-  (`read_header_timeout`, `idle_timeout`, `max_header_bytes`, `shutdown_timeout`)
-- `global.tls`: Certificate used by `type: https` listeners (`cert_file`, `key_file`);
-  startup validation fails if the files do not exist
-- `global.log`: Optional file logging with rotation (`dir`, `filename`,
-  `max_size` MB, `max_backups`); logs go to stderr when `dir`/`filename` are empty
-- `global.source_ip_blacklist`: Client IPs or CIDR ranges rejected with 403
-- `global.add_proxy_headers`: Add `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
-  to forwarded requests (default true)
-- `global.debug`: Print extra per-request detail logs (the summary line is always printed)
-- `listeners`: Array of listeners
-  - `port`: Listen port (1-65535)
-  - `type`: `http` (default) or `https`
-  - `dispatch`: Array of dispatch rules
-    - `domain`: Domain to match (without protocol or port); `*` matches any domain
-    - `path`: Optional path pattern: exact (`/health`) or prefix wildcard (`/api/*`)
-    - `forward_to`: Target URL (required for `forward` and `redirect`)
-    - `type`: `forward` (default), `redirect` or `mock`
-    - `priority`: Optional integer added to the automatic match score
-    - `remove_headers`: Headers to strip before forwarding (only `forward`)
-    - `mock_status` / `mock_headers` / `mock_body`: Mock response definition (only `mock`)
+- `global.forward`：转发引擎的共享参数（连接池、拨号/TLS 超时、`request_timeout`、
+  `stream_idle_timeout`、`response_body_timeout`、`streaming_flush`、
+  `disable_compression`、`force_attempt_http2`、`buffer_size`）——名称与默认值与
+  `domain-forwarder` 保持一致
+- `global.server`：作用于所有监听器的 HTTP 服务端设置（`read_header_timeout`、
+  `idle_timeout`、`max_header_bytes`、`shutdown_timeout`）
+- `global.tls`：`type: https` 监听器使用的证书（`cert_file`、`key_file`）；
+  启动校验会在文件不存在时报错
+- `global.log`：可选的带滚动的文件日志（`dir`、`filename`、`max_size`（MB）、
+  `max_backups`）；`dir`/`filename` 为空时日志输出到 stderr
+- `global.source_ip_blacklist`：以 403 拒绝的客户端 IP 或 CIDR 网段
+- `global.add_proxy_headers`：为转发的请求添加 `X-Forwarded-For`/`X-Forwarded-Proto`/
+  `X-Forwarded-Host`（默认 true）
+- `global.debug`：输出额外的每请求明细日志（摘要日志始终输出）
+- `listeners`：监听器数组
+  - `port`：监听端口（1-65535）
+  - `type`：`http`（默认）或 `https`
+  - `dispatch`：分发规则数组
+    - `domain`：待匹配的域名（不含协议和端口）；`*` 匹配任意域名
+    - `path`：可选的路径模式：精确匹配（`/health`）或前缀通配（`/api/*`）
+    - `forward_to`：目标 URL（`forward` 与 `redirect` 类型必填）
+    - `type`：`forward`（默认）、`redirect` 或 `mock`
+    - `priority`：可选的整数，叠加到自动匹配得分上
+    - `remove_headers`：转发前需要移除的请求头（仅 `forward` 类型生效）
+    - `mock_status` / `mock_headers` / `mock_body`：预设响应定义（仅 `mock` 类型生效）
 
-## How It Works
+## 工作原理
 
-1. The application starts one HTTP server per configured listener
-2. The domain is extracted from the `Host` header (port stripped, IPv6-safe)
-3. The listener picks the best matching rule by domain/path score plus the
-   optional `priority`
-4. `forward` proxies the request to the target URL, `redirect` answers with a
-   302, `mock` answers locally
-5. Requests whose source IP is blacklisted get a 403; unmatched domains get a 404
+1. 程序为每个配置的监听器各启动一个 HTTP 服务
+2. 从 `Host` 头中提取域名（去掉端口，并兼容 IPv6 写法）
+3. 监听器按域名/路径得分加上可选的 `priority`，选出最优匹配规则
+4. `forward` 将请求代理到目标 URL，`redirect` 返回 302，`mock` 在本地返回预设响应
+5. 来源 IP 命中黑名单的请求返回 403；域名未匹配的请求返回 404
 
-Match priority (highest to lowest): exact domain > wildcard domain; exact path >
-prefix wildcard path > no path. The rule with the highest combined score wins.
+匹配优先级（由高到低）：精确域名 > 通配域名；精确路径 > 前缀通配路径 > 不带路径。
+综合得分最高的规则胜出。
 
-## Request Forwarding Details
+## 请求转发细节
 
-- **Method**: Preserved (GET, POST, PUT, DELETE, etc.)
-- **Headers**: All headers are copied except hop-by-hop headers and `Host` (set
-  to the target host); a `Connection` header's listed tokens are stripped too.
-  With `disable_compression: true` (default) the client's `Accept-Encoding` is
-  not forwarded upstream
-- **Path and query**: Original path and query parameters are preserved
-- **Body**: Request body is forwarded as-is, preserving `Content-Length`
-- **Protocol**: Supports forwarding between HTTP and HTTPS
-- **Streaming**: `text/event-stream` responses are flushed chunk by chunk
-- **Failures**: A forward failure before the response starts returns 502 Bad
-  Gateway; failures after the response has started are only logged
+- **方法**：保持不变（GET、POST、PUT、DELETE 等）
+- **请求头**：除逐跳（hop-by-hop）请求头和 `Host`（改写为目标主机）外，其余请求头全部复制；
+  `Connection` 头中列出的那些请求头也会被剥离。当 `disable_compression: true`（默认）时，
+  客户端的 `Accept-Encoding` 不会透传给上游
+- **路径与查询串**：保留原始路径和查询参数
+- **请求体**：原样转发，并保留 `Content-Length`
+- **协议**：支持 HTTP 与 HTTPS 之间的互相转发
+- **流式响应**：`text/event-stream` 响应逐块 flush 输出
+- **失败处理**：响应尚未开始就发生转发失败，返回 502 Bad Gateway；响应已经开始之后的失败仅记录日志
 
-## Building
-
-```bash
-# Local build (build/domain-dispatcher)
-make build
-
-# Cross-platform builds
-make build-linux
-make build-linux-arm64
-make build-macos
-make build-macos-arm64
-make build-windows
-make build-all
-
-# Release archives (tar.gz / zip)
-make release
-
-# Tests
-make test
-```
-
-Version and build time are injected via `-ldflags` (`git describe` /
-UTC timestamp) and printed by `--version` and at startup.
-
-## Deployment
-
-Scripted installation on Linux (systemd service, dedicated user):
-
-```bash
-make build-linux
-sudo ./scripts/install.sh
-```
-
-See [DEPLOY.md](DEPLOY.md) for manual deployment, service management and
-troubleshooting. Removal: `sudo ./scripts/uninstall.sh`.
-
-## Testing the Dispatcher Locally
-
-```bash
-./build/domain-dispatcher -c config.yaml &
-
-# forward rule
-curl -H "Host: abc-api.com" http://127.0.0.1:8080/hello
-
-# mock rule
-curl -H "Host: mock-api.com" http://127.0.0.1:8080/health
-
-# unmatched domain -> 404
-curl -H "Host: unknown.com" http://127.0.0.1:8080/
-```
-
-## Project Structure
+## 项目结构
 
 ```
 domain-dispatcher/
-├── main.go                      # Flags, startup, graceful shutdown
-├── config.go                    # Configuration types, defaults, loading, validation
-├── handler.go                   # Request handling, rule matching, summary logging
-├── pkg/forwarder/forwarder.go   # Shared forwarding engine (kept in sync with domain-forwarder)
-├── config.example.yaml          # Annotated config template (copy to config.yaml)
-├── Makefile                     # Build automation
+├── main.go                      # 命令行参数、启动流程、优雅关闭
+├── config.go                    # 配置类型、默认值、加载与校验
+├── handler.go                   # 请求处理、规则匹配、摘要日志
+├── pkg/forwarder/forwarder.go   # 共享转发引擎（与 domain-forwarder 保持同步）
+├── config.example.yaml          # 带注释的配置模板（复制为 config.yaml 使用）
+├── Makefile                     # 构建自动化
 ├── scripts/                     # install.sh / uninstall.sh
-├── DEPLOY.md                    # Deployment guide
-└── README.md                    # This file
+├── DEPLOY.md                    # 部署指南
+├── README.md                    # 本文件（中文）
+└── README_EN.md                 # 英文文档
 ```
 
-## License
+## 许可
 
 MIT

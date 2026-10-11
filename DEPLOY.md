@@ -18,7 +18,17 @@ Linux systems.
 
 ## Building Binaries
 
-Run the following in the project root to build for each platform:
+Run the following in the project root:
+
+```bash
+# Local build for the current platform (build/domain-dispatcher)
+make build
+
+# Tests
+make test
+```
+
+Cross-platform builds:
 
 ```bash
 # Build Linux (amd64) version
@@ -45,8 +55,12 @@ make release
 
 Build output locations:
 
+- Local build: `build/domain-dispatcher`
 - Platform binaries: `dist/<platform>-<arch>/domain-dispatcher` (each directory also contains `config.yaml`)
 - Release archives: `dist/domain-dispatcher-<version>-<platform>-<arch>.tar.gz` (zip for Windows)
+
+Version and build time are injected via `-ldflags` (`git describe` / UTC
+timestamp) and printed by `--version` and at startup.
 
 ---
 
