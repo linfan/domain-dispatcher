@@ -30,7 +30,8 @@ const (
 	ListenerTypeHTTPS ListenerType = "https"
 )
 
-// TLSConfig represents the TLS certificate configuration used by https listeners.
+// TLSConfig represents a TLS certificate bound to one dispatch domain, served
+// by https listeners when the client's SNI server name matches that domain.
 type TLSConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
@@ -157,6 +158,7 @@ type DispatchRule struct {
 	ForwardTo     string            `yaml:"forward_to"`
 	Type          RuleType          `yaml:"type"`
 	Priority      int               `yaml:"priority"`       // Manual priority adjustment added to matching score (default 0)
+	TLS           *TLSConfig        `yaml:"tls"`            // TLS certificate for this domain (https listeners only)
 	RemoveHeaders []string          `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
 	MockStatus    int               `yaml:"mock_status"`    // HTTP status code for mock response (default 200, only for mock type)
 	MockHeaders   map[string]string `yaml:"mock_headers"`   // Response headers for mock type
@@ -174,7 +176,6 @@ type ListenerConfig struct {
 type GlobalConfig struct {
 	Forward           ForwardConfig `yaml:"forward"`
 	Server            ServerConfig  `yaml:"server"`
-	TLS               TLSConfig     `yaml:"tls"`
 	Log               LogConfig     `yaml:"log"`
 	SourceIPBlacklist []string      `yaml:"source_ip_blacklist"`
 	AddProxyHeaders   bool          `yaml:"add_proxy_headers"` // Add X-Forwarded-For/Proto/Host when forwarding
@@ -296,19 +297,41 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("listener %d: invalid type: %s (must be 'http' or 'https')", i+1, listener.Type)
 		}
 
-		// Validate TLS configuration for https listeners
+		// TLS certificates are domain-bound, so https listeners serve one
+		// certificate per dispatch rule, selected by the client's SNI name.
 		if listener.Type == ListenerTypeHTTPS {
-			if cfg.Global.TLS.CertFile == "" {
-				return fmt.Errorf("listener %d: tls.cert_file is required for https listener", i+1)
+			hasCert := false
+			certFileByDomain := make(map[string]string)
+			keyFileByDomain := make(map[string]string)
+			for j, rule := range listener.Dispatch {
+				if rule.TLS == nil {
+					continue
+				}
+				if rule.TLS.CertFile == "" || rule.TLS.KeyFile == "" {
+					return fmt.Errorf("listener %d, rule %d: tls.cert_file and tls.key_file are both required", i+1, j+1)
+				}
+				if _, err := os.Stat(rule.TLS.CertFile); os.IsNotExist(err) {
+					return fmt.Errorf("listener %d, rule %d: tls cert file not found: %s", i+1, j+1, rule.TLS.CertFile)
+				}
+				if _, err := os.Stat(rule.TLS.KeyFile); os.IsNotExist(err) {
+					return fmt.Errorf("listener %d, rule %d: tls key file not found: %s", i+1, j+1, rule.TLS.KeyFile)
+				}
+				if prev, ok := certFileByDomain[rule.Domain]; ok && (prev != rule.TLS.CertFile || keyFileByDomain[rule.Domain] != rule.TLS.KeyFile) {
+					return fmt.Errorf("listener %d: dispatch rules for domain %q configure conflicting tls certificates (cert %s key %s vs cert %s key %s)",
+						i+1, rule.Domain, prev, keyFileByDomain[rule.Domain], rule.TLS.CertFile, rule.TLS.KeyFile)
+				}
+				certFileByDomain[rule.Domain] = rule.TLS.CertFile
+				keyFileByDomain[rule.Domain] = rule.TLS.KeyFile
+				hasCert = true
 			}
-			if cfg.Global.TLS.KeyFile == "" {
-				return fmt.Errorf("listener %d: tls.key_file is required for https listener", i+1)
+			if !hasCert {
+				return fmt.Errorf("listener %d: https listener requires a tls certificate on at least one dispatch rule", i+1)
 			}
-			if _, err := os.Stat(cfg.Global.TLS.CertFile); os.IsNotExist(err) {
-				return fmt.Errorf("listener %d: tls cert file not found: %s", i+1, cfg.Global.TLS.CertFile)
-			}
-			if _, err := os.Stat(cfg.Global.TLS.KeyFile); os.IsNotExist(err) {
-				return fmt.Errorf("listener %d: tls key file not found: %s", i+1, cfg.Global.TLS.KeyFile)
+		} else {
+			for j, rule := range listener.Dispatch {
+				if rule.TLS != nil {
+					return fmt.Errorf("listener %d, rule %d: tls certificate configured but listener type is not https", i+1, j+1)
+				}
 			}
 		}
 

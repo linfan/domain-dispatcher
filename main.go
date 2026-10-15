@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -93,7 +94,7 @@ func main() {
 			handleRequest(w, r, listener, engine, &cfg.Global)
 		})
 
-		servers = append(servers, &http.Server{
+		srv := &http.Server{
 			Addr:    fmt.Sprintf(":%d", listener.Port),
 			Handler: mux,
 			// No Read/Write timeout: request and response bodies may stream
@@ -103,7 +104,15 @@ func main() {
 			IdleTimeout:       cfg.Global.Server.IdleTimeout,
 			ReadHeaderTimeout: cfg.Global.Server.ReadHeaderTimeout,
 			MaxHeaderBytes:    cfg.Global.Server.MaxHeaderBytes,
-		})
+		}
+		if listener.Type == ListenerTypeHTTPS {
+			tlsConfig, err := buildTLSConfig(listener)
+			if err != nil {
+				log.Fatalf("Failed to build TLS configuration for port %d: %v", listener.Port, err)
+			}
+			srv.TLSConfig = tlsConfig
+		}
+		servers = append(servers, srv)
 	}
 
 	// Register the signal handler before starting the listeners so a signal
@@ -117,7 +126,8 @@ func main() {
 		go func(srv *http.Server, l ListenerConfig) {
 			var err error
 			if l.Type == ListenerTypeHTTPS {
-				err = srv.ListenAndServeTLS(cfg.Global.TLS.CertFile, cfg.Global.TLS.KeyFile)
+				// Certificates are selected per domain by srv.TLSConfig.GetCertificate.
+				err = srv.ListenAndServeTLS("", "")
 			} else {
 				err = srv.ListenAndServe()
 			}
@@ -155,4 +165,39 @@ func main() {
 		os.Exit(exitCode)
 	}
 	log.Println("Server stopped")
+}
+
+// buildTLSConfig loads the per-domain certificates from the listener's dispatch
+// rules and returns a tls.Config that selects a certificate by the client's SNI
+// server name. The certificate of a "*" wildcard-domain rule, if any, is the
+// fallback for unknown server names and clients that send no SNI; without one,
+// such connections fail the TLS handshake.
+func buildTLSConfig(listener ListenerConfig) (*tls.Config, error) {
+	certs := make(map[string]*tls.Certificate)
+	var fallback *tls.Certificate
+	for _, rule := range listener.Dispatch {
+		if rule.TLS == nil {
+			continue
+		}
+		cert, err := tls.LoadX509KeyPair(rule.TLS.CertFile, rule.TLS.KeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load tls certificate for domain %q: %w", rule.Domain, err)
+		}
+		if rule.Domain == "*" {
+			fallback = &cert
+			continue
+		}
+		if _, ok := certs[rule.Domain]; !ok {
+			certs[rule.Domain] = &cert
+		}
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if cert, ok := certs[hello.ServerName]; ok {
+				return cert, nil
+			}
+			return fallback, nil
+		},
+	}, nil
 }

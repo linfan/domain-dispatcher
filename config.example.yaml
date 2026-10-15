@@ -39,11 +39,6 @@ global:
     max_header_bytes: 1048576      # Max size of request headers (1MB)
     shutdown_timeout: 30s          # Grace period for in-flight requests on SIGINT/SIGTERM
 
-  # TLS certificate used by `type: https` listeners
-  tls:
-    cert_file: /path/to/server.crt
-    key_file: /path/to/server.key
-
   # Optional file logging with size-based rotation (lumberjack).
   # Enabled only when both dir and filename are set; otherwise logs go to stderr.
   log:
@@ -104,11 +99,29 @@ listeners:
       # - domain: "*"
       #   forward_to: http://127.0.0.1:9000
 
-  # HTTPS listener example. Requires a certificate; startup validation fails
-  # when the configured tls files do not exist.
+  # HTTPS listener example. TLS certificates are domain-bound, so each dispatch
+  # rule that should be reachable over HTTPS carries its own certificate and the
+  # cert matching the client's TLS SNI server name is presented. The cert of a
+  # "*" wildcard rule, if any, is the fallback for unknown domains and clients
+  # that send no SNI; without it those connections fail the handshake. Startup
+  # validation requires at least one certificate per https listener, existing
+  # cert/key files, and rejects two different certs for the same domain.
   # - port: 8443
   #   type: https
   #   dispatch:
   #     - domain: abc-api.com
   #       forward_to: https://abc-api.com:8080
-  #       type: redirect           # 302 redirect to the target
+  #       tls:
+  #         cert_file: /etc/domain-dispatcher/certs/abc-api.com.crt
+  #         key_file: /etc/domain-dispatcher/certs/abc-api.com.key
+  #     - domain: xyz-api.com
+  #       path: /api/*
+  #       forward_to: https://xyz.com/backend
+  #       tls:
+  #         cert_file: /etc/domain-dispatcher/certs/xyz-api.com.crt
+  #         key_file: /etc/domain-dispatcher/certs/xyz-api.com.key
+  #     - domain: "*"                    # fallback rule and fallback certificate
+  #       forward_to: http://127.0.0.1:9000
+  #       tls:
+  #         cert_file: /etc/domain-dispatcher/certs/default.crt
+  #         key_file: /etc/domain-dispatcher/certs/default.key

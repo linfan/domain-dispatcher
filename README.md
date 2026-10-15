@@ -16,7 +16,7 @@
 - **请求头控制**：转发前移除指定请求头；可选添加 `X-Forwarded-*`
 - **适配 SSE 的转发**：流式响应逐块 flush 输出，且不与上游协商压缩，因此事件即时送达、不会成批堆积
 - **超时配置**：上游拨号、响应头、正文空闲、正文总时长，以及服务端读请求头、空闲超时可全部配置
-- **HTTP 与 HTTPS 监听**：HTTPS 使用全局证书配置
+- **HTTP 与 HTTPS 监听**：TLS 证书与域名绑定，按分发规则逐域名配置，握手时依据 SNI 自动选择对应证书
 - **来源 IP 黑名单**：以 403 拒绝指定 IP 或 CIDR 网段
 - **优雅关闭**：收到 SIGINT/SIGTERM 后停止接受新连接，并在 `server.shutdown_timeout` 内处理完在途请求
 - **每请求摘要日志**：每个请求（forward、redirect、mock 以及 404）都输出一行摘要
@@ -77,9 +77,6 @@ global:
     response_body_timeout: 300s      # 非流式正文的总时长上限（0s 表示关闭）
   server:
     shutdown_timeout: 30s
-  tls:
-    cert_file: /path/to/server.crt
-    key_file: /path/to/server.key
   log:                               # 可选；不配置则输出到 stderr
     dir: /var/log/domain-dispatcher
     filename: app.log
@@ -109,6 +106,20 @@ listeners:
       - domain: old-api.com
         forward_to: https://new-api.com
         type: redirect
+
+  - port: 8443
+    type: https
+    dispatch:
+      - domain: abc-api.com
+        forward_to: https://abc.com/api
+        tls:                         # 证书按域名逐条配置（https 监听器）
+          cert_file: /etc/domain-dispatcher/certs/abc-api.com.crt
+          key_file: /etc/domain-dispatcher/certs/abc-api.com.key
+      - domain: "*"                  # 兜底规则；其证书同时作为未知 SNI 的兜底证书
+        forward_to: https://abc.com/api
+        tls:
+          cert_file: /etc/domain-dispatcher/certs/default.crt
+          key_file: /etc/domain-dispatcher/certs/default.key
 ```
 
 ### 配置字段说明
@@ -136,6 +147,11 @@ listeners:
     - `forward_to`：目标 URL（`forward` 与 `redirect` 类型必填）
     - `type`：`forward`（默认）、`redirect` 或 `mock`
     - `priority`：可选的整数，叠加到自动匹配得分上
+    - `tls`：可选的证书配置（`cert_file`、`key_file`，仅 `https` 监听器生效）。
+      TLS 证书与域名绑定，因此按规则逐域名配置：TLS 握手时依据客户端的 SNI 服务器名
+      呈现对应域名的证书；`*` 规则的证书作为未知域名及未发送 SNI 客户端的兜底证书，
+      未配置兜底时这些连接握手失败。`https` 监听器要求至少一条规则配置证书，
+      启动校验会在证书文件不存在或同域名配置了不同证书时报错
     - `remove_headers`：转发前需要移除的请求头（仅 `forward` 类型生效）
     - `mock_status` / `mock_headers` / `mock_body`：预设响应定义（仅 `mock` 类型生效）
 

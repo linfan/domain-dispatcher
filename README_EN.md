@@ -18,7 +18,7 @@ Building, cross-platform releases and Linux/systemd deployment are covered in
 - **Header control**: Remove configured headers before forwarding; optionally add `X-Forwarded-*`
 - **SSE-aware forwarding**: Streaming responses are flushed chunk by chunk and the upstream never negotiates compression, so events are delivered immediately instead of in bursts
 - **Timeouts**: Upstream dial/header/body-idle/body-duration and server read-header/idle timeouts are all configurable
-- **HTTP and HTTPS listeners**: HTTPS uses the global certificate configuration
+- **HTTP and HTTPS listeners**: TLS certificates are domain-bound and configured per dispatch rule; the matching certificate is selected by the client's TLS SNI name
 - **Source IP blacklist**: Reject individual IPs or CIDR ranges with 403
 - **Graceful shutdown**: SIGINT/SIGTERM stops accepting connections and drains in-flight requests within `server.shutdown_timeout`
 - **Per-request summary log**: One line for every request (forward, redirect, mock and 404)
@@ -81,9 +81,6 @@ global:
     response_body_timeout: 300s      # total cap for non-streaming bodies (0s = off)
   server:
     shutdown_timeout: 30s
-  tls:
-    cert_file: /path/to/server.crt
-    key_file: /path/to/server.key
   log:                               # optional; omit for stderr
     dir: /var/log/domain-dispatcher
     filename: app.log
@@ -113,6 +110,20 @@ listeners:
       - domain: old-api.com
         forward_to: https://new-api.com
         type: redirect
+
+  - port: 8443
+    type: https
+    dispatch:
+      - domain: abc-api.com
+        forward_to: https://abc.com/api
+        tls:                         # certificates are configured per rule (https listeners)
+          cert_file: /etc/domain-dispatcher/certs/abc-api.com.crt
+          key_file: /etc/domain-dispatcher/certs/abc-api.com.key
+      - domain: "*"                  # fallback rule; its cert also covers unknown SNI
+        forward_to: https://abc.com/api
+        tls:
+          cert_file: /etc/domain-dispatcher/certs/default.crt
+          key_file: /etc/domain-dispatcher/certs/default.key
 ```
 
 ### Configuration Fields
@@ -124,8 +135,6 @@ listeners:
   `domain-forwarder`
 - `global.server`: HTTP server settings applied to every listener
   (`read_header_timeout`, `idle_timeout`, `max_header_bytes`, `shutdown_timeout`)
-- `global.tls`: Certificate used by `type: https` listeners (`cert_file`, `key_file`);
-  startup validation fails if the files do not exist
 - `global.log`: Optional file logging with rotation (`dir`, `filename`,
   `max_size` MB, `max_backups`); logs go to stderr when `dir`/`filename` are empty
 - `global.source_ip_blacklist`: Client IPs or CIDR ranges rejected with 403
@@ -141,6 +150,14 @@ listeners:
     - `forward_to`: Target URL (required for `forward` and `redirect`)
     - `type`: `forward` (default), `redirect` or `mock`
     - `priority`: Optional integer added to the automatic match score
+    - `tls`: Optional certificate configuration (`cert_file`, `key_file`, only
+      effective on `https` listeners). TLS certificates are domain-bound, so they
+      are configured per rule: during the TLS handshake the certificate of the
+      rule matching the client's SNI server name is presented; the `*` rule's
+      certificate is the fallback for unknown domains and clients without SNI,
+      and without it those connections fail the handshake. An `https` listener
+      requires a certificate on at least one rule; startup validation fails on
+      missing cert/key files or two different certificates for the same domain
     - `remove_headers`: Headers to strip before forwarding (only `forward`)
     - `mock_status` / `mock_headers` / `mock_body`: Mock response definition (only `mock`)
 

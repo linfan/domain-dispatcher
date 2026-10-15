@@ -122,9 +122,6 @@ global:
     response_body_timeout: 300s
   server:
     shutdown_timeout: 30s
-  tls:                               # required only for https listeners
-    cert_file: /etc/domain-dispatcher/server.crt
-    key_file: /etc/domain-dispatcher/server.key
   log:
     dir: /var/log/domain-dispatcher
     filename: app.log
@@ -149,10 +146,29 @@ listeners:
         mock_headers:
           Content-Type: application/json
         mock_body: '{"status":"ok"}'
+
+  # TLS certificates are domain-bound, so each dispatch rule reachable over
+  # HTTPS carries its own certificate; the one matching the client's TLS SNI
+  # name is presented. The "*" rule's certificate is the fallback for unknown
+  # domains and clients that send no SNI.
+  - port: 8443
+    type: https
+    dispatch:
+      - domain: api.example.com
+        forward_to: http://localhost:3000
+        tls:
+          cert_file: /etc/domain-dispatcher/certs/api.example.com.crt
+          key_file: /etc/domain-dispatcher/certs/api.example.com.key
+      - domain: "*"
+        forward_to: http://localhost:3000
+        tls:
+          cert_file: /etc/domain-dispatcher/certs/default.crt
+          key_file: /etc/domain-dispatcher/certs/default.key
 ```
 
-Configuration errors (unknown timings, a missing certificate for an `https`
-listener, an invalid blacklist entry, a bad port) make the process exit with
+Configuration errors (unknown timings, an `https` listener without a
+certificate on any dispatch rule, missing certificate files, an invalid
+blacklist entry, a bad port) make the process exit with
 code 1 and a precise error message — check `journalctl` after editing.
 
 #### 5. Create systemd Service File
@@ -296,8 +312,9 @@ sudo journalctl -u domain-dispatcher -n 50 --no-pager
 ```
 
 The startup log points at the exact problem: missing/invalid config file,
-`no listeners configured`, an invalid port or dispatch rule type, a missing
-TLS certificate for an `https` listener, an invalid blacklist entry, or a port
+`no listeners configured`, an invalid port or dispatch rule type, an `https`
+listener whose rules configure no TLS certificate or missing certificate
+files, an invalid blacklist entry, or a port
 already in use. Run the binary manually to see the error directly:
 
 ```bash
