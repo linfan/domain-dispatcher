@@ -68,7 +68,7 @@ echo "6. Creating systemd service..."
 cat > "$SERVICE_FILE" << 'EOF'
 [Unit]
 Description=Domain Dispatcher HTTP Request Router
-Documentation=https://github.com/freyrlin/domain-dispatcher
+Documentation=https://github.com/linfan/domain-dispatcher
 After=network.target network-online.target
 Wants=network-online.target
 
@@ -82,6 +82,7 @@ Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536
 LimitNPROC=4096
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
