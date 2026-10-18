@@ -20,7 +20,9 @@
 - **HTTP 与 HTTPS 监听**：TLS 证书与域名绑定，按分发规则逐域名配置，握手时依据 SNI 自动选择对应证书
 - **来源 IP 黑名单**：以 403 拒绝指定 IP 或 CIDR 网段
 - **优雅关闭**：收到 SIGINT/SIGTERM 后停止接受新连接，并在 `server.shutdown_timeout` 内处理完在途请求
-- **每请求摘要日志**：每个请求（forward、redirect、mock 以及 404）都输出一行摘要
+- **每请求摘要日志**：每个请求（forward、redirect、mock 以及 403/404/500）都输出一行
+  摘要，包含自动生成或沿用的 `X-Request-ID`（并透传给上游）；目标 URL 的查询串与
+  userinfo 会脱敏
 - **可选文件日志**：通过 `global.log` 按文件大小滚动
 - **YAML 配置**：可配置多个监听端口，每个监听器拥有各自的规则集
 
@@ -134,12 +136,9 @@ listeners:
 
 - `global.forward`：转发引擎的共享参数（连接池、拨号/TLS 超时、`request_timeout`、
   `stream_idle_timeout`、`response_body_timeout`、`streaming_flush`、
-  `disable_compression`、`force_attempt_http2`、`buffer_size`）——名称与默认值与
-  `domain-forwarder` 保持一致
+  `disable_compression`、`force_attempt_http2`、`buffer_size`）
 - `global.server`：作用于所有监听器的 HTTP 服务端设置（`read_header_timeout`、
   `idle_timeout`、`max_header_bytes`、`shutdown_timeout`）
-- `global.tls`：`type: https` 监听器使用的证书（`cert_file`、`key_file`）；
-  启动校验会在文件不存在时报错
 - `global.log`：可选的带滚动的文件日志（`dir`、`filename`、`max_size`（MB）、
   `max_backups`）；`dir`/`filename` 为空时日志输出到 stderr
 - `global.source_ip_blacklist`：以 403 拒绝的客户端 IP 或 CIDR 网段
@@ -150,9 +149,12 @@ listeners:
   - `port`：监听端口（1-65535）
   - `type`：`http`（默认）或 `https`
   - `dispatch`：分发规则数组
-    - `domain`：待匹配的域名（不含协议和端口）；`*` 匹配任意域名
+    - `domain`：待匹配的域名（不含协议和端口），匹配时不区分大小写并忽略末尾的点；
+      `*` 匹配任意域名
     - `path`：可选的路径模式：精确匹配（`/health`）或前缀通配（`/api/*`）
-    - `forward_to`：目标 URL（`forward` 与 `redirect` 类型必填）
+    - `forward_to`：目标 URL（`forward` 与 `redirect` 类型必填）；其路径部分作为基础
+      路径与请求路径拼接（如 `https://abc.com/api` + `/hello` →
+      `https://abc.com/api/hello`），查询串取自原始请求
     - `type`：`forward`（默认）、`redirect` 或 `mock`
     - `priority`：可选的整数，叠加到自动匹配得分上
     - `tls`：可选的证书配置（`cert_file`、`key_file`，仅 `https` 监听器生效）。
@@ -164,14 +166,15 @@ listeners:
     - `rewrite`：可选的转发改写（仅 `forward` 类型生效）
       - `domain`：覆盖发往上游的 `Host` 头；省略时使用 `forward_to` 的主机。
         该覆盖仅影响 HTTP `Host` 头，HTTPS 上游的 SNI 与证书校验仍使用 `forward_to` 的主机
-      - `url`：对请求路径做正则替换（`pattern`、`replacement`），查询串原样保留；
-        `replacement` 支持 `$1`、`${name}` 形式的捕获组引用，`$$` 表示字面量 `$`
+      - `url`：对请求路径做正则替换（`pattern`、`replacement`），替换结果再与
+        `forward_to` 的路径前缀拼接；查询串原样保留。`replacement` 支持 `$1`、
+        `${name}` 形式的捕获组引用，`$$` 表示字面量 `$`
     - `mock_status` / `mock_headers` / `mock_body`：预设响应定义（仅 `mock` 类型生效）
 
 ## 工作原理
 
 1. 程序为每个配置的监听器各启动一个 HTTP 服务
-2. 从 `Host` 头中提取域名（去掉端口，并兼容 IPv6 写法）
+2. 从 `Host` 头中提取域名（去掉端口，兼容 IPv6 写法，并统一为小写、忽略末尾的点）
 3. 监听器按域名/路径得分加上可选的 `priority`，选出最优匹配规则
 4. `forward` 将请求代理到目标 URL，`redirect` 返回 302，`mock` 在本地返回预设响应
 5. 来源 IP 命中黑名单的请求返回 403；域名未匹配的请求返回 404
@@ -187,7 +190,9 @@ listeners:
   其余请求头全部复制；
   `Connection` 头中列出的那些请求头也会被剥离。当 `disable_compression: true`（默认）时，
   客户端的 `Accept-Encoding` 不会透传给上游
-- **路径与查询串**：保留原始路径和查询参数；配置 `rewrite.url` 时会先按正则替换路径
+- **路径与查询串**：原始路径与 `forward_to` 的路径前缀拼接（自动处理斜杠），保留原始
+  查询参数；未配置 `rewrite.url` 时还会保留请求路径的百分号编码（如 `%2F`）。
+  配置 `rewrite.url` 时先按正则替换解码后的路径，再拼接前缀
 - **请求体**：原样转发，并保留 `Content-Length`
 - **协议**：支持 HTTP 与 HTTPS 之间的互相转发
 - **流式响应**：`text/event-stream` 响应逐块 flush 输出
@@ -200,7 +205,7 @@ domain-dispatcher/
 ├── main.go                      # 命令行参数、启动流程、优雅关闭
 ├── config.go                    # 配置类型、默认值、加载与校验
 ├── handler.go                   # 请求处理、规则匹配、摘要日志
-├── pkg/forwarder/forwarder.go   # 共享转发引擎（与 domain-forwarder 保持同步）
+├── pkg/forwarder/forwarder.go   # 共享转发引擎
 ├── config.example.yaml          # 带注释的配置模板（复制为 config.yaml 使用）
 ├── Makefile                     # 构建自动化
 ├── scripts/                     # install.sh / uninstall.sh

@@ -213,8 +213,7 @@ type Config struct {
 }
 
 // defaultForwardConfig returns the built-in forward section defaults. The
-// values mirror pkg/forwarder.DefaultConfig and the sibling project
-// domain-forwarder; keep all three in sync.
+// values mirror pkg/forwarder.DefaultConfig; keep the two in sync.
 func defaultForwardConfig() ForwardConfig {
 	return ForwardConfig{
 		BufferSize:            32 * 1024,
@@ -270,6 +269,13 @@ func LoadConfig(filename string) (*Config, error) {
 	return cfg, nil
 }
 
+// normalizeHostname lowercases a DNS name and drops its optional trailing dot;
+// DNS names are case-insensitive, so Host, SNI and configured domains must be
+// compared in the same normalized form.
+func normalizeHostname(host string) string {
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
 // normalize fills per-slice defaults that whole-struct defaults cannot express.
 func normalize(cfg *Config) {
 	for i := range cfg.Listeners {
@@ -279,6 +285,7 @@ func normalize(cfg *Config) {
 		}
 		for j := range listener.Dispatch {
 			rule := &listener.Dispatch[j]
+			rule.Domain = normalizeHostname(rule.Domain)
 			if rule.Type == "" {
 				rule.Type = RuleTypeForward
 			}
@@ -412,11 +419,14 @@ func validateBlacklistEntry(entry string) error {
 }
 
 // FindRule finds the best matching dispatch rule for a given domain and request path.
+// Domain matching is case-insensitive and ignores a trailing dot.
 // Priority (highest to lowest): exact domain > wildcard domain; exact path > wildcard path > no path.
 // The rule with the highest combined score wins. When matching prefix wildcard paths tie,
 // the longest prefix wins; remaining ties go to the first configured rule. Each rule's
 // Priority field is added to its score, allowing manual override of the automatic order.
 func (lc *ListenerConfig) FindRule(domain, reqPath string) (DispatchRule, bool) {
+	domain = normalizeHostname(domain)
+
 	var bestRule *DispatchRule
 	bestScore := -1
 	bestWildcardLen := -1
@@ -424,13 +434,14 @@ func (lc *ListenerConfig) FindRule(domain, reqPath string) (DispatchRule, bool) 
 
 	for i := range lc.Dispatch {
 		rule := &lc.Dispatch[i]
+		ruleDomain := normalizeHostname(rule.Domain)
 		score := rule.Priority
 		isWildcard := false
 		wildcardLen := -1
 
-		if rule.Domain == domain {
+		if ruleDomain == domain {
 			score += 100
-		} else if rule.Domain == "*" {
+		} else if ruleDomain == "*" {
 			score += 10
 		} else {
 			continue

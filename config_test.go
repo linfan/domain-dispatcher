@@ -1,6 +1,56 @@
 package main
 
-import "testing"
+import (
+	"crypto/tls"
+	"testing"
+)
+
+func TestNormalizeConfigDomains(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Listeners = []ListenerConfig{{
+		Port: 8080,
+		Dispatch: []DispatchRule{{
+			Domain:    "API.Example.COM.",
+			ForwardTo: "http://127.0.0.1:9000",
+		}},
+	}}
+
+	normalize(cfg)
+
+	if got := cfg.Listeners[0].Dispatch[0].Domain; got != "api.example.com" {
+		t.Errorf("normalize() domain = %q, want %q", got, "api.example.com")
+	}
+}
+
+func TestFindRuleNormalizesDomain(t *testing.T) {
+	listener := ListenerConfig{Dispatch: []DispatchRule{
+		{Domain: "API.Example.COM.", ForwardTo: "exact"},
+		{Domain: "*", ForwardTo: "wildcard"},
+	}}
+
+	rule, found := listener.FindRule("api.example.com", "/")
+	if !found || rule.ForwardTo != "exact" {
+		t.Fatalf("FindRule() = %q, found=%v; want exact rule", rule.ForwardTo, found)
+	}
+
+	rule, found = listener.FindRule("EXAMPLE.com.", "/")
+	if !found || rule.ForwardTo != "wildcard" {
+		t.Fatalf("FindRule() = %q, found=%v; want wildcard rule", rule.ForwardTo, found)
+	}
+}
+
+func TestCertificateForServerNameNormalizesSNI(t *testing.T) {
+	exact := &tls.Certificate{}
+	fallback := &tls.Certificate{}
+	certs := map[string]*tls.Certificate{"api.example.com": exact}
+
+	if got := certificateForServerName(certs, fallback, "API.Example.COM."); got != exact {
+		t.Error("certificateForServerName() did not normalize the SNI name")
+	}
+	if got := certificateForServerName(certs, fallback, "unknown.example.com"); got != fallback {
+		t.Error("certificateForServerName() did not fall back for an unknown SNI name")
+	}
+}
 
 func TestFindRulePrefersLongestWildcardPrefix(t *testing.T) {
 	tests := []struct {

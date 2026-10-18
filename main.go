@@ -91,7 +91,7 @@ func main() {
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			handleRequest(w, r, listener, engine, &cfg.Global)
+			serveHTTP(w, r, listener, engine, &cfg.Global)
 		})
 
 		srv := &http.Server{
@@ -183,21 +183,28 @@ func buildTLSConfig(listener ListenerConfig) (*tls.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to load tls certificate for domain %q: %w", rule.Domain, err)
 		}
-		if rule.Domain == "*" {
+		if normalizeHostname(rule.Domain) == "*" {
 			fallback = &cert
 			continue
 		}
-		if _, ok := certs[rule.Domain]; !ok {
-			certs[rule.Domain] = &cert
+		domain := normalizeHostname(rule.Domain)
+		if _, ok := certs[domain]; !ok {
+			certs[domain] = &cert
 		}
 	}
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if cert, ok := certs[hello.ServerName]; ok {
-				return cert, nil
-			}
-			return fallback, nil
+			return certificateForServerName(certs, fallback, hello.ServerName), nil
 		},
 	}, nil
+}
+
+// certificateForServerName selects the certificate for a normalized SNI name,
+// falling back to the wildcard rule's certificate when none matches.
+func certificateForServerName(certs map[string]*tls.Certificate, fallback *tls.Certificate, serverName string) *tls.Certificate {
+	if cert, ok := certs[normalizeHostname(serverName)]; ok {
+		return cert
+	}
+	return fallback
 }

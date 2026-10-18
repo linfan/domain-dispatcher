@@ -1,6 +1,6 @@
-// Package forwarder implements the shared HTTP forwarding engine used by both
-// domain-forwarder and domain-dispatcher. Keep this file byte-identical in both
-// repositories.
+// Package forwarder implements the HTTP forwarding engine used by the
+// dispatcher: pooled upstream connections, streaming flushes and body-phase
+// watchdogs.
 package forwarder
 
 import (
@@ -50,8 +50,8 @@ type Config struct {
 	ForceAttemptHTTP2     bool
 }
 
-// DefaultConfig returns the canonical engine defaults. Both applications
-// prepopulate their YAML configuration with the same values.
+// DefaultConfig returns the canonical engine defaults. The dispatcher's YAML
+// defaults mirror these values.
 func DefaultConfig() Config {
 	return Config{
 		BufferSize:            32 * 1024,
@@ -242,7 +242,7 @@ func (f *Forwarder) forwardRequest(w http.ResponseWriter, r *http.Request, targe
 		headerTimer.Stop()
 	}
 	if err != nil {
-		return result, fmt.Errorf("failed to send request: %w", err)
+		return result, fmt.Errorf("failed to send request: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 
@@ -290,6 +290,26 @@ func (f *Forwarder) forwardRequest(w http.ResponseWriter, r *http.Request, targe
 	}
 
 	return result, nil
+}
+
+// redactURLError removes userinfo and the query string from the URL captured in
+// a *url.Error so credentials and tokens never reach the logs.
+func redactURLError(err error) error {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	if u, parseErr := url.Parse(uerr.URL); parseErr == nil {
+		u.User = nil
+		u.RawQuery = ""
+		u.ForceQuery = false
+		u.Fragment = ""
+		u.RawFragment = ""
+		uerr.URL = u.String()
+	} else if i := strings.IndexAny(uerr.URL, "?#"); i >= 0 {
+		uerr.URL = uerr.URL[:i]
+	}
+	return err
 }
 
 // watchdog records which body-phase limit aborted a response, so the resulting

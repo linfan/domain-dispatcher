@@ -22,7 +22,7 @@ Building, cross-platform releases and Linux/systemd deployment are covered in
 - **HTTP and HTTPS listeners**: TLS certificates are domain-bound and configured per dispatch rule; the matching certificate is selected by the client's TLS SNI name
 - **Source IP blacklist**: Reject individual IPs or CIDR ranges with 403
 - **Graceful shutdown**: SIGINT/SIGTERM stops accepting connections and drains in-flight requests within `server.shutdown_timeout`
-- **Per-request summary log**: One line for every request (forward, redirect, mock and 404)
+- **Per-request summary log**: One line for every request (forward, redirect, mock, and 403/404/500), including a generated or propagated `X-Request-ID`; query strings and userinfo in target URLs are redacted
 - **Optional file logging**: Size-based rotation via `global.log`
 - **YAML configuration**: Multiple listeners, each with its own rule set
 
@@ -139,8 +139,7 @@ listeners:
 - `global.forward`: Shared forwarding-engine parameters (connection pool,
   dial/TLS timeouts, `request_timeout`, `stream_idle_timeout`,
   `response_body_timeout`, `streaming_flush`, `disable_compression`,
-  `force_attempt_http2`, `buffer_size`) — same names and defaults as
-  `domain-forwarder`
+  `force_attempt_http2`, `buffer_size`)
 - `global.server`: HTTP server settings applied to every listener
   (`read_header_timeout`, `idle_timeout`, `max_header_bytes`, `shutdown_timeout`)
 - `global.log`: Optional file logging with rotation (`dir`, `filename`,
@@ -153,9 +152,13 @@ listeners:
   - `port`: Listen port (1-65535)
   - `type`: `http` (default) or `https`
   - `dispatch`: Array of dispatch rules
-    - `domain`: Domain to match (without protocol or port); `*` matches any domain
+    - `domain`: Domain to match (without protocol or port); matching is
+      case-insensitive and ignores a trailing dot; `*` matches any domain
     - `path`: Optional path pattern: exact (`/health`) or prefix wildcard (`/api/*`)
-    - `forward_to`: Target URL (required for `forward` and `redirect`)
+    - `forward_to`: Target URL (required for `forward` and `redirect`); its path
+      component is a base prefix joined with the request path (for example
+      `https://abc.com/api` + `/hello` → `https://abc.com/api/hello`); the query
+      string comes from the original request
     - `type`: `forward` (default), `redirect` or `mock`
     - `priority`: Optional integer added to the automatic match score
     - `tls`: Optional certificate configuration (`cert_file`, `key_file`, only
@@ -172,14 +175,16 @@ listeners:
         of `forward_to`. This only affects the HTTP `Host` header; TLS SNI and
         certificate verification for HTTPS upstreams still use the `forward_to` host
       - `url`: Regex substitution on the request path (`pattern`, `replacement`);
-        the query string is preserved. `replacement` supports capture references
-        such as `$1` and `${name}`; `$$` is a literal `$`
+        the result is joined with the `forward_to` path prefix and the query
+        string is preserved. `replacement` supports capture references such as
+        `$1` and `${name}`; `$$` is a literal `$`
     - `mock_status` / `mock_headers` / `mock_body`: Mock response definition (only `mock`)
 
 ## How It Works
 
 1. The application starts one HTTP server per configured listener
-2. The domain is extracted from the `Host` header (port stripped, IPv6-safe)
+2. The domain is extracted from the `Host` header (port stripped, IPv6-safe,
+   lowercased, with a trailing dot ignored)
 3. The listener picks the best matching rule by domain/path score plus the
    optional `priority`
 4. `forward` proxies the request to the target URL, `redirect` answers with a
@@ -199,8 +204,11 @@ remaining tie goes to the first configured rule.
   header's listed tokens are stripped too.
   With `disable_compression: true` (default) the client's `Accept-Encoding` is
   not forwarded upstream
-- **Path and query**: Original path and query parameters are preserved; when
-  `rewrite.url` is configured the path is regex-rewritten first
+- **Path and query**: The original path is joined with the `forward_to` path
+  prefix (slashes handled automatically) and the original query is preserved.
+  Without `rewrite.url`, the request path's percent-encoding (such as `%2F`) is
+  preserved too; with `rewrite.url`, the decoded path is regex-rewritten first
+  and then joined with the prefix
 - **Body**: Request body is forwarded as-is, preserving `Content-Length`
 - **Protocol**: Supports forwarding between HTTP and HTTPS
 - **Streaming**: `text/event-stream` responses are flushed chunk by chunk
@@ -214,7 +222,7 @@ domain-dispatcher/
 ├── main.go                      # Flags, startup, graceful shutdown
 ├── config.go                    # Configuration types, defaults, loading, validation
 ├── handler.go                   # Request handling, rule matching, summary logging
-├── pkg/forwarder/forwarder.go   # Shared forwarding engine (kept in sync with domain-forwarder)
+├── pkg/forwarder/forwarder.go   # Shared forwarding engine
 ├── config.example.yaml          # Annotated config template (copy to config.yaml)
 ├── Makefile                     # Build automation
 ├── scripts/                     # install.sh / uninstall.sh
