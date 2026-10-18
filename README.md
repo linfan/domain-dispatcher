@@ -143,7 +143,9 @@ listeners:
   `max_backups`）；`dir`/`filename` 为空时日志输出到 stderr
 - `global.source_ip_blacklist`：以 403 拒绝的客户端 IP 或 CIDR 网段
 - `global.add_proxy_headers`：为转发的请求添加 `X-Forwarded-For`/`X-Forwarded-Proto`/
-  `X-Forwarded-Host`（默认 true）
+  `X-Forwarded-Host`（默认 true）。客户端已有的 `X-Forwarded-For` 会被保留并在末尾追加
+  真实来源，`X-Forwarded-Proto`/`X-Forwarded-Host` 仅在缺失时补充；若监听端口直接暴露
+  给不可信客户端，上游不应信任这些头，可用规则的 `remove_headers` 将其移除
 - `global.debug`：输出额外的每请求明细日志（摘要日志始终输出）
 - `listeners`：监听器数组
   - `port`：监听端口（1-65535）
@@ -159,7 +161,8 @@ listeners:
     - `priority`：可选的整数，叠加到自动匹配得分上
     - `tls`：可选的证书配置（`cert_file`、`key_file`，仅 `https` 监听器生效）。
       TLS 证书与域名绑定，因此按规则逐域名配置：TLS 握手时依据客户端的 SNI 服务器名
-      呈现对应域名的证书；`*` 规则的证书作为未知域名及未发送 SNI 客户端的兜底证书，
+      呈现对应域名的证书（匹配不区分大小写，忽略末尾的点）；`*` 规则的证书作为未知域名及
+      未发送 SNI 客户端的兜底证书，
       未配置兜底时这些连接握手失败。`https` 监听器要求至少一条规则配置证书，
       启动校验会在证书文件不存在或同域名配置了不同证书时报错
     - `remove_headers`：转发前需要移除的请求头（仅 `forward` 类型生效）
@@ -194,6 +197,7 @@ listeners:
   查询参数；未配置 `rewrite.url` 时还会保留请求路径的百分号编码（如 `%2F`）。
   配置 `rewrite.url` 时先按正则替换解码后的路径，再拼接前缀
 - **请求体**：原样转发，并保留 `Content-Length`
+- **WebSocket**：暂不支持协议升级。`Upgrade`/`Connection` 属于逐跳头，会在转发前被剥离
 - **协议**：支持 HTTP 与 HTTPS 之间的互相转发
 - **流式响应**：`text/event-stream` 响应逐块 flush 输出
 - **失败处理**：响应尚未开始就发生转发失败，返回 502 Bad Gateway；响应已经开始之后的失败仅记录日志

@@ -146,7 +146,10 @@ listeners:
   `max_size` MB, `max_backups`); logs go to stderr when `dir`/`filename` are empty
 - `global.source_ip_blacklist`: Client IPs or CIDR ranges rejected with 403
 - `global.add_proxy_headers`: Add `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
-  to forwarded requests (default true)
+  to forwarded requests (default true). A client-supplied `X-Forwarded-For` is preserved
+  and the real source is appended; the other two headers are only filled when absent.
+  Do not trust these headers upstream when the listener is exposed to untrusted clients;
+  strip them with a rule's `remove_headers`
 - `global.debug`: Print extra per-request detail logs (the summary line is always printed)
 - `listeners`: Array of listeners
   - `port`: Listen port (1-65535)
@@ -164,8 +167,9 @@ listeners:
     - `tls`: Optional certificate configuration (`cert_file`, `key_file`, only
       effective on `https` listeners). TLS certificates are domain-bound, so they
       are configured per rule: during the TLS handshake the certificate of the
-      rule matching the client's SNI server name is presented; the `*` rule's
-      certificate is the fallback for unknown domains and clients without SNI,
+      rule matching the client's SNI server name is presented (matching is
+      case-insensitive and ignores a trailing dot); the `*` rule's certificate is
+      the fallback for unknown domains and clients without SNI,
       and without it those connections fail the handshake. An `https` listener
       requires a certificate on at least one rule; startup validation fails on
       missing cert/key files or two different certificates for the same domain
@@ -210,6 +214,8 @@ remaining tie goes to the first configured rule.
   preserved too; with `rewrite.url`, the decoded path is regex-rewritten first
   and then joined with the prefix
 - **Body**: Request body is forwarded as-is, preserving `Content-Length`
+- **WebSocket**: Protocol upgrades are not supported; the hop-by-hop `Upgrade`
+  and `Connection` headers are stripped before forwarding
 - **Protocol**: Supports forwarding between HTTP and HTTPS
 - **Streaming**: `text/event-stream` responses are flushed chunk by chunk
 - **Failures**: A forward failure before the response starts returns 502 Bad

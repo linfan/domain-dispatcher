@@ -54,7 +54,11 @@ global:
   #   - 203.0.113.7
   #   - 192.168.0.0/16
 
-  # Add X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host to forwarded requests
+  # Add X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host to forwarded requests.
+  # A client-supplied X-Forwarded-For is preserved and the real source appended; the
+  # other two are only filled when absent. Do not trust these headers upstream when
+  # the listener is exposed to untrusted clients; strip them per rule with
+  # remove_headers.
   add_proxy_headers: true
 
   # Extra per-request detail logs; the one-line request summary is always printed
