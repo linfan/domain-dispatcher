@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -151,6 +152,28 @@ func (lc *LogConfig) Enabled() bool {
 	return lc.Dir != "" && lc.Filename != ""
 }
 
+// RewriteConfig rewrites a request forwarded by a forward rule.
+type RewriteConfig struct {
+	Domain string      `yaml:"domain"` // Host header sent upstream; empty keeps the target URL host
+	URL    *URLRewrite `yaml:"url"`    // Regex substitution applied to the request path
+}
+
+// URLRewrite replaces the request path using a regular expression. The query
+// string is not part of the match and is preserved. Replacement supports capture
+// references ($1, ${name}); $$ is a literal dollar sign.
+type URLRewrite struct {
+	Pattern     string `yaml:"pattern"`
+	Replacement string `yaml:"replacement"`
+
+	re *regexp.Regexp
+}
+
+// Apply returns path with the rewrite applied. Config validation compiles the
+// pattern at startup.
+func (u *URLRewrite) Apply(path string) string {
+	return u.re.ReplaceAllString(path, u.Replacement)
+}
+
 // DispatchRule represents a single domain dispatch rule
 type DispatchRule struct {
 	Domain        string            `yaml:"domain"`
@@ -160,6 +183,7 @@ type DispatchRule struct {
 	Priority      int               `yaml:"priority"`       // Manual priority adjustment added to matching score (default 0)
 	TLS           *TLSConfig        `yaml:"tls"`            // TLS certificate for this domain (https listeners only)
 	RemoveHeaders []string          `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
+	Rewrite       *RewriteConfig    `yaml:"rewrite"`        // Domain and URL rewrites (only for forward type)
 	MockStatus    int               `yaml:"mock_status"`    // HTTP status code for mock response (default 200, only for mock type)
 	MockHeaders   map[string]string `yaml:"mock_headers"`   // Response headers for mock type
 	MockBody      string            `yaml:"mock_body"`      // Response body for mock type
@@ -288,7 +312,8 @@ func (cfg *Config) Validate() error {
 		}
 	}
 
-	for i, listener := range cfg.Listeners {
+	for i := range cfg.Listeners {
+		listener := &cfg.Listeners[i]
 		if listener.Port <= 0 || listener.Port > 65535 {
 			return fmt.Errorf("listener %d: invalid port: %d (must be between 1 and 65535)", i+1, listener.Port)
 		}
@@ -339,7 +364,8 @@ func (cfg *Config) Validate() error {
 			return fmt.Errorf("listener %d: no dispatch rules configured", i+1)
 		}
 
-		for j, rule := range listener.Dispatch {
+		for j := range listener.Dispatch {
+			rule := &listener.Dispatch[j]
 			if rule.Type != RuleTypeForward && rule.Type != RuleTypeRedirect && rule.Type != RuleTypeMock {
 				return fmt.Errorf("listener %d, rule %d: invalid type: %s (must be 'forward', 'redirect' or 'mock')", i+1, j+1, rule.Type)
 			}
@@ -347,6 +373,23 @@ func (cfg *Config) Validate() error {
 			if rule.Type != RuleTypeMock && rule.ForwardTo == "" {
 				return fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
 			}
+			if rule.Rewrite == nil {
+				continue
+			}
+			if rule.Type != RuleTypeForward {
+				return fmt.Errorf("listener %d, rule %d: rewrite is only supported for forward rules", i+1, j+1)
+			}
+			if rule.Rewrite.URL == nil {
+				continue
+			}
+			if rule.Rewrite.URL.Pattern == "" {
+				return fmt.Errorf("listener %d, rule %d: rewrite.url.pattern cannot be empty", i+1, j+1)
+			}
+			re, err := regexp.Compile(rule.Rewrite.URL.Pattern)
+			if err != nil {
+				return fmt.Errorf("listener %d, rule %d: invalid rewrite.url.pattern: %w", i+1, j+1, err)
+			}
+			rule.Rewrite.URL.re = re
 		}
 	}
 

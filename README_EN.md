@@ -16,6 +16,7 @@ Building, cross-platform releases and Linux/systemd deployment are covered in
 - **Manual rule priority**: `priority` adds to the automatic match score to order overlapping rules
 - **Multiple dispatch types**: `forward` (reverse proxy), `redirect` (302), `mock` (local canned response)
 - **Header control**: Remove configured headers before forwarding; optionally add `X-Forwarded-*`
+- **Forward rewriting**: `forward` rules can override the upstream `Host` header and rewrite the request path with a regular expression
 - **SSE-aware forwarding**: Streaming responses are flushed chunk by chunk and the upstream never negotiates compression, so events are delivered immediately instead of in bursts
 - **Timeouts**: Upstream dial/header/body-idle/body-duration and server read-header/idle timeouts are all configurable
 - **HTTP and HTTPS listeners**: TLS certificates are domain-bound and configured per dispatch rule; the matching certificate is selected by the client's TLS SNI name
@@ -99,6 +100,13 @@ listeners:
       - domain: xyz-api.com
         path: /api/*                 # only requests under /api/
         forward_to: https://xyz.com/backend
+      - domain: rewrite-api.com
+        forward_to: http://127.0.0.1:9000
+        rewrite:
+          domain: backend.internal   # overrides the Host header sent upstream
+          url:                       # regex substitution on the request path
+            pattern: '^/api/v1/(.*)$'
+            replacement: '/v2/$1'
       - domain: mock-api.com
         path: /health
         type: mock                   # local response, no upstream
@@ -159,6 +167,13 @@ listeners:
       requires a certificate on at least one rule; startup validation fails on
       missing cert/key files or two different certificates for the same domain
     - `remove_headers`: Headers to strip before forwarding (only `forward`)
+    - `rewrite`: Optional forwarding rewrites (only `forward` rules)
+      - `domain`: Overrides the `Host` header sent upstream; defaults to the host
+        of `forward_to`. This only affects the HTTP `Host` header; TLS SNI and
+        certificate verification for HTTPS upstreams still use the `forward_to` host
+      - `url`: Regex substitution on the request path (`pattern`, `replacement`);
+        the query string is preserved. `replacement` supports capture references
+        such as `$1` and `${name}`; `$$` is a literal `$`
     - `mock_status` / `mock_headers` / `mock_body`: Mock response definition (only `mock`)
 
 ## How It Works
@@ -178,10 +193,12 @@ prefix wildcard path > no path. The rule with the highest combined score wins.
 
 - **Method**: Preserved (GET, POST, PUT, DELETE, etc.)
 - **Headers**: All headers are copied except hop-by-hop headers and `Host` (set
-  to the target host); a `Connection` header's listed tokens are stripped too.
+  to the target host, or to `rewrite.domain` when configured); a `Connection`
+  header's listed tokens are stripped too.
   With `disable_compression: true` (default) the client's `Accept-Encoding` is
   not forwarded upstream
-- **Path and query**: Original path and query parameters are preserved
+- **Path and query**: Original path and query parameters are preserved; when
+  `rewrite.url` is configured the path is regex-rewritten first
 - **Body**: Request body is forwarded as-is, preserving `Content-Length`
 - **Protocol**: Supports forwarding between HTTP and HTTPS
 - **Streaming**: `text/event-stream` responses are flushed chunk by chunk

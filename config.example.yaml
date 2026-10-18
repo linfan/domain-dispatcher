@@ -79,6 +79,17 @@ listeners:
         remove_headers:            # Strip these headers before forwarding
           - X-Forwarded-For
           - X-Real-IP
+      # Rewrite the forwarded request before it reaches the upstream (only for
+      # forward rules). domain overrides the Host header sent upstream; url
+      # applies a regex substitution to the request path while the query string
+      # is preserved. $1 (or ${name}) references capture groups; $$ is a literal $.
+      - domain: rewrite-api.com
+        forward_to: http://127.0.0.1:9000
+        rewrite:
+          domain: backend.internal
+          url:
+            pattern: '^/api/v1/(.*)$'
+            replacement: '/v2/$1'
       - domain: mock-api.com
         type: mock                 # Respond locally without contacting an upstream
         mock_status: 200           # Optional HTTP status code (default 200)

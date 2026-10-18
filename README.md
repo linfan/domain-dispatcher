@@ -14,6 +14,7 @@
 - **手动规则优先级**：`priority` 会叠加到自动匹配得分上，用于排定相互重叠的规则
 - **多种分发类型**：`forward`（反向代理）、`redirect`（302 重定向）、`mock`（本地预设响应）
 - **请求头控制**：转发前移除指定请求头；可选添加 `X-Forwarded-*`
+- **转发改写**：`forward` 规则可覆盖发往上游的 `Host` 头，并用正则替换请求路径
 - **适配 SSE 的转发**：流式响应逐块 flush 输出，且不与上游协商压缩，因此事件即时送达、不会成批堆积
 - **超时配置**：上游拨号、响应头、正文空闲、正文总时长，以及服务端读请求头、空闲超时可全部配置
 - **HTTP 与 HTTPS 监听**：TLS 证书与域名绑定，按分发规则逐域名配置，握手时依据 SNI 自动选择对应证书
@@ -95,6 +96,13 @@ listeners:
       - domain: xyz-api.com
         path: /api/*                 # 仅匹配 /api/ 下的请求
         forward_to: https://xyz.com/backend
+      - domain: rewrite-api.com
+        forward_to: http://127.0.0.1:9000
+        rewrite:
+          domain: backend.internal   # 覆盖发往上游的 Host 头
+          url:                       # 对请求路径做正则替换
+            pattern: '^/api/v1/(.*)$'
+            replacement: '/v2/$1'
       - domain: mock-api.com
         path: /health
         type: mock                   # 本地响应，不回源
@@ -153,6 +161,11 @@ listeners:
       未配置兜底时这些连接握手失败。`https` 监听器要求至少一条规则配置证书，
       启动校验会在证书文件不存在或同域名配置了不同证书时报错
     - `remove_headers`：转发前需要移除的请求头（仅 `forward` 类型生效）
+    - `rewrite`：可选的转发改写（仅 `forward` 类型生效）
+      - `domain`：覆盖发往上游的 `Host` 头；省略时使用 `forward_to` 的主机。
+        该覆盖仅影响 HTTP `Host` 头，HTTPS 上游的 SNI 与证书校验仍使用 `forward_to` 的主机
+      - `url`：对请求路径做正则替换（`pattern`、`replacement`），查询串原样保留；
+        `replacement` 支持 `$1`、`${name}` 形式的捕获组引用，`$$` 表示字面量 `$`
     - `mock_status` / `mock_headers` / `mock_body`：预设响应定义（仅 `mock` 类型生效）
 
 ## 工作原理
@@ -169,10 +182,11 @@ listeners:
 ## 请求转发细节
 
 - **方法**：保持不变（GET、POST、PUT、DELETE 等）
-- **请求头**：除逐跳（hop-by-hop）请求头和 `Host`（改写为目标主机）外，其余请求头全部复制；
+- **请求头**：除逐跳（hop-by-hop）请求头和 `Host`（默认为目标主机，可由 `rewrite.domain` 覆盖）外，
+  其余请求头全部复制；
   `Connection` 头中列出的那些请求头也会被剥离。当 `disable_compression: true`（默认）时，
   客户端的 `Accept-Encoding` 不会透传给上游
-- **路径与查询串**：保留原始路径和查询参数
+- **路径与查询串**：保留原始路径和查询参数；配置 `rewrite.url` 时会先按正则替换路径
 - **请求体**：原样转发，并保留 `Content-Length`
 - **协议**：支持 HTTP 与 HTTPS 之间的互相转发
 - **流式响应**：`text/event-stream` 响应逐块 flush 输出

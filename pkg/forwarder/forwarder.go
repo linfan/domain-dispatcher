@@ -164,7 +164,18 @@ func (f *Forwarder) getHTTPClient() *http.Client {
 // aborts a body that stops delivering bytes, and Config.ResponseBodyTimeout additionally
 // caps how long a non-streaming body may take overall. Errors raised after the response
 // has started reaching the client wrap ErrResponseStarted.
-func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) (result Result, err error) {
+func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr string, removeHeaders []string) (Result, error) {
+	return f.forwardRequest(w, r, targetURLStr, "", removeHeaders)
+}
+
+// ForwardRequestWithHost behaves like ForwardRequest but sends hostOverride as
+// the Host header when it is non-empty. TLS SNI and certificate verification
+// still use the target URL's host.
+func (f *Forwarder) ForwardRequestWithHost(w http.ResponseWriter, r *http.Request, targetURLStr, hostOverride string, removeHeaders []string) (Result, error) {
+	return f.forwardRequest(w, r, targetURLStr, hostOverride, removeHeaders)
+}
+
+func (f *Forwarder) forwardRequest(w http.ResponseWriter, r *http.Request, targetURLStr, hostOverride string, removeHeaders []string) (result Result, err error) {
 	start := time.Now()
 	defer func() { result.Duration = time.Since(start) }()
 	result.ReqSize = r.ContentLength
@@ -209,6 +220,9 @@ func (f *Forwarder) ForwardRequest(w http.ResponseWriter, r *http.Request, targe
 		return result, fmt.Errorf("failed to parse target URL: %w", err)
 	}
 	req.Host = u.Host
+	if hostOverride != "" {
+		req.Host = hostOverride
+	}
 
 	// RequestTimeout bounds only the wait for the upstream response headers: the
 	// deadline is dropped as soon as headers arrive so that streaming response

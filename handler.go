@@ -55,7 +55,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		}
 		logSummary(r, host, rule.MockStatus, written, time.Since(start))
 	case RuleTypeRedirect:
-		targetURL, err := buildTargetURL(rule.ForwardTo, r)
+		targetURL, err := buildTargetURL(rule.ForwardTo, r, nil)
 		if err != nil {
 			log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -67,7 +67,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
 		logSummary(r, targetURL, http.StatusFound, 0, time.Since(start))
 	case RuleTypeForward:
-		targetURL, err := buildTargetURL(rule.ForwardTo, r)
+		targetURL, err := buildTargetURL(rule.ForwardTo, r, rule.Rewrite)
 		if err != nil {
 			log.Printf("[Port %d] Invalid target URL %s: %v", listener.Port, rule.ForwardTo, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -83,7 +83,11 @@ func handleRequest(w http.ResponseWriter, r *http.Request, listener ListenerConf
 		if global.Debug {
 			log.Printf("[Port %d] Forwarding %s to %s", listener.Port, host, targetURL)
 		}
-		result, fwdErr := fwd.ForwardRequest(w, r, targetURL, rule.RemoveHeaders)
+		hostOverride := ""
+		if rule.Rewrite != nil {
+			hostOverride = rule.Rewrite.Domain
+		}
+		result, fwdErr := fwd.ForwardRequestWithHost(w, r, targetURL, hostOverride, rule.RemoveHeaders)
 		logSummary(r, targetURL, result.StatusCode, result.RespSize, result.Duration)
 		if fwdErr != nil {
 			log.Printf("[Port %d] Failed to forward request to %s: %v", listener.Port, targetURL, fwdErr)
@@ -113,15 +117,21 @@ func requestHost(r *http.Request) string {
 }
 
 // buildTargetURL combines the rule's target base URL with the original request
-// path and query.
-func buildTargetURL(target string, r *http.Request) (string, error) {
+// path and query. When rewrite is set, its URL substitution is applied to the
+// path first; the query string is preserved unchanged.
+func buildTargetURL(target string, r *http.Request, rewrite *RewriteConfig) (string, error) {
 	targetURL, err := url.Parse(target)
 	if err != nil {
 		return "", err
 	}
 
-	// Build the target URL with original path and query
-	targetURL.Path = r.URL.Path
+	path := r.URL.Path
+	if rewrite != nil && rewrite.URL != nil {
+		path = rewrite.URL.Apply(path)
+	}
+
+	// Build the target URL with the (possibly rewritten) path and original query
+	targetURL.Path = path
 	targetURL.RawQuery = r.URL.RawQuery
 	return targetURL.String(), nil
 }
