@@ -69,8 +69,9 @@ listeners:
     dispatch:
       # Rules are matched by domain and optional path; the highest combined
       # score wins: exact domain +100 > wildcard domain +10, exact path +50 >
-      # prefix wildcard +5. A rule's priority is added to its score for manual
-      # ordering of overlapping rules.
+      # prefix wildcard +5. When matching prefix wildcards tie, the longest
+      # prefix wins; remaining ties go to the first configured rule. A rule's
+      # priority is added to its score for manual ordering of overlapping rules.
       - domain: abc-api.com
         forward_to: https://abc.com/api
       - domain: xyz-api.com

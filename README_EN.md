@@ -12,7 +12,7 @@ Building, cross-platform releases and Linux/systemd deployment are covered in
 ## Features
 
 - **Domain-based routing**: Match the `Host` header exactly, with `*` as a wildcard fallback
-- **Path matching**: Optional `path` filter per rule, exact (`/health`) or prefix wildcard (`/api/*`)
+- **Path matching**: Optional `path` filter per rule, exact (`/health`) or prefix wildcard (`/api/*`); longer wildcard prefixes take precedence
 - **Manual rule priority**: `priority` adds to the automatic match score to order overlapping rules
 - **Multiple dispatch types**: `forward` (reverse proxy), `redirect` (302), `mock` (local canned response)
 - **Header control**: Remove configured headers before forwarding; optionally add `X-Forwarded-*`
@@ -188,6 +188,8 @@ listeners:
 
 Match priority (highest to lowest): exact domain > wildcard domain; exact path >
 prefix wildcard path > no path. The rule with the highest combined score wins.
+Among prefix wildcard paths with the same score, the longest prefix wins; any
+remaining tie goes to the first configured rule.
 
 ## Request Forwarding Details
 

@@ -413,15 +413,20 @@ func validateBlacklistEntry(entry string) error {
 
 // FindRule finds the best matching dispatch rule for a given domain and request path.
 // Priority (highest to lowest): exact domain > wildcard domain; exact path > wildcard path > no path.
-// The rule with the highest combined score wins. Each rule's Priority field is added to its score,
-// allowing manual override of the automatic matching order.
+// The rule with the highest combined score wins. When matching prefix wildcard paths tie,
+// the longest prefix wins; remaining ties go to the first configured rule. Each rule's
+// Priority field is added to its score, allowing manual override of the automatic order.
 func (lc *ListenerConfig) FindRule(domain, reqPath string) (DispatchRule, bool) {
 	var bestRule *DispatchRule
 	bestScore := -1
+	bestWildcardLen := -1
+	bestIsWildcard := false
 
 	for i := range lc.Dispatch {
 		rule := &lc.Dispatch[i]
 		score := rule.Priority
+		isWildcard := false
+		wildcardLen := -1
 
 		if rule.Domain == domain {
 			score += 100
@@ -434,15 +439,23 @@ func (lc *ListenerConfig) FindRule(domain, reqPath string) (DispatchRule, bool) 
 		if rule.Path != "" {
 			if rule.Path == reqPath {
 				score += 50
-			} else if strings.HasSuffix(rule.Path, "/*") && strings.HasPrefix(reqPath, rule.Path[:len(rule.Path)-1]) {
+			} else if strings.HasSuffix(rule.Path, "/*") {
+				prefix := rule.Path[:len(rule.Path)-1]
+				if !strings.HasPrefix(reqPath, prefix) {
+					continue
+				}
 				score += 5
+				isWildcard = true
+				wildcardLen = len(prefix)
 			} else {
 				continue
 			}
 		}
 
-		if score > bestScore {
+		if score > bestScore || (score == bestScore && isWildcard && bestIsWildcard && wildcardLen > bestWildcardLen) {
 			bestScore = score
+			bestWildcardLen = wildcardLen
+			bestIsWildcard = isWildcard
 			bestRule = rule
 		}
 	}
