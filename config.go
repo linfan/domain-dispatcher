@@ -214,22 +214,28 @@ type Config struct {
 	Listeners    []ListenerConfig `yaml:"listeners"`
 }
 
-// defaultTransportConfig returns the built-in transport section defaults. The
-// values mirror pkg/forwarder.DefaultConfig; keep the two in sync.
+// defaultTransportConfig returns the built-in transport section defaults,
+// derived from pkg/forwarder.DefaultConfig so the engine and the YAML defaults
+// cannot drift apart.
 func defaultTransportConfig() TransportConfig {
+	d := forwarder.DefaultConfig()
 	return TransportConfig{
-		BufferSize:            32 * 1024,
-		MaxIdleConns:          1000,
-		MaxIdleConnsPerHost:   100,
-		MaxConnsPerHost:       0,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		DialTimeout:           10 * time.Second,
-		DialKeepAlive:         30 * time.Second,
-		RequestTimeout:        60 * time.Second,
-		ForceAttemptHTTP2:     true,
+		BufferSize:            d.BufferSize,
+		MaxIdleConns:          d.MaxIdleConns,
+		MaxIdleConnsPerHost:   d.MaxIdleConnsPerHost,
+		MaxConnsPerHost:       d.MaxConnsPerHost,
+		IdleConnTimeout:       d.IdleConnTimeout,
+		TLSHandshakeTimeout:   d.TLSHandshakeTimeout,
+		ExpectContinueTimeout: d.ExpectContinueTimeout,
+		ResponseHeaderTimeout: d.ResponseHeaderTimeout,
+		DialTimeout:           d.DialTimeout,
+		DialKeepAlive:         d.DialKeepAlive,
+		RequestTimeout:        d.RequestTimeout,
+		StreamIdleTimeout:     d.StreamIdleTimeout,
+		ResponseBodyTimeout:   d.ResponseBodyTimeout,
+		StreamingFlush:        &d.StreamingFlush,
+		DisableCompression:    &d.DisableCompression,
+		ForceAttemptHTTP2:     d.ForceAttemptHTTP2,
 	}
 }
 
