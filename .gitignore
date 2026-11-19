@@ -10,6 +10,7 @@
 *.out
 *.prof
 *.cover
+*.coverprofile
 
 # Build output directory
 build/
@@ -17,21 +18,11 @@ dist/
 bin/
 domain-dispatcher
 
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool
-*.cover
-*.coverprofile
-
 # Go workspace file
 go.work
 go.work.sum
 
 # Dependency directories
-vendor/
-
-# Go sum files (if using vendoring)
 vendor/
 
 # IDE and Editor files
