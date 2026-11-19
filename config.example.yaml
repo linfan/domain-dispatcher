@@ -3,66 +3,65 @@
 # Every value below is the built-in default, so an omitted key keeps its
 # default value. The listeners section is required; everything else is optional.
 #
-# The forward section controls the upstream connection pool, timeouts and
+# The transport section controls the upstream connection pool, timeouts and
 # streaming behavior.
 
-global:
-  # ---------------------------------------------------------------------------
-  # Forwarding engine: upstream connection pool, timeouts and streaming
-  # ---------------------------------------------------------------------------
-  forward:
-    buffer_size: 32768             # Copy buffer size in bytes (default: 32KB)
-    max_idle_conns: 1000           # Max total idle (keep-alive) connections in the pool
-    max_idle_conns_per_host: 100   # Max idle connections per upstream host
-    max_conns_per_host: 0          # Max total connections per upstream host; 0 = unlimited
-    idle_conn_timeout: 90s         # How long an idle connection is kept before closing
-    tls_handshake_timeout: 10s     # TLS handshake timeout for upstream connections
-    expect_continue_timeout: 1s    # Wait for a 100-continue before sending the request body
-    response_header_timeout: 30s   # Max wait for the upstream response headers
-    dial_timeout: 10s              # TCP connect timeout
-    dial_keep_alive: 30s           # TCP keep-alive interval for upstream connections
-    request_timeout: 60s           # Max wait for upstream response headers incl. dialing;
+# -----------------------------------------------------------------------------
+# Upstream transport: connection pool, timeouts and streaming
+# -----------------------------------------------------------------------------
+transport:
+  buffer_size: 32768               # Copy buffer size in bytes (default: 32KB)
+  max_idle_conns: 1000             # Max total idle (keep-alive) connections in the pool
+  max_idle_conns_per_host: 100     # Max idle connections per upstream host
+  max_conns_per_host: 0            # Max total connections per upstream host; 0 = unlimited
+  idle_conn_timeout: 90s           # How long an idle connection is kept before closing
+  tls_handshake_timeout: 10s       # TLS handshake timeout for upstream connections
+  expect_continue_timeout: 1s      # Wait for a 100-continue before sending the request body
+  response_header_timeout: 30s     # Max wait for the upstream response headers
+  dial_timeout: 10s                # TCP connect timeout
+  dial_keep_alive: 30s             # TCP keep-alive interval for upstream connections
+  request_timeout: 60s             # Max wait for upstream response headers incl. dialing;
                                    # does not limit body transfer (0 = disabled)
-    stream_idle_timeout: 0s        # Abort a response body that receives no bytes for this
+  stream_idle_timeout: 0s          # Abort a response body that receives no bytes for this
                                    # long; 0s = disabled (e.g. 120s)
-    response_body_timeout: 0s      # Total duration cap for a non-streaming response body;
+  response_body_timeout: 0s        # Total duration cap for a non-streaming response body;
                                    # 0s = disabled (e.g. 300s)
-    streaming_flush: true          # Flush streaming (SSE) responses chunk by chunk
-    disable_compression: true      # Never negotiate compression with the upstream, so a
+  streaming_flush: true            # Flush streaming (SSE) responses chunk by chunk
+  disable_compression: true        # Never negotiate compression with the upstream, so a
                                    # compressing gateway cannot buffer SSE streams in bursts
-    force_attempt_http2: true      # Attempt HTTP/2 for TLS upstream connections
+  force_attempt_http2: true        # Attempt HTTP/2 for TLS upstream connections
 
-  # HTTP server settings applied to every listener
-  server:
-    read_header_timeout: 10s       # Max time to read the request headers
-    idle_timeout: 120s             # How long an idle keep-alive connection is kept
-    max_header_bytes: 1048576      # Max size of request headers (1MB)
-    shutdown_timeout: 30s          # Grace period for in-flight requests on SIGINT/SIGTERM
+# HTTP server settings applied to every listener
+server:
+  read_header_timeout: 10s         # Max time to read the request headers
+  idle_timeout: 120s               # How long an idle keep-alive connection is kept
+  max_header_bytes: 1048576        # Max size of request headers (1MB)
+  shutdown_timeout: 30s            # Grace period for in-flight requests on SIGINT/SIGTERM
 
-  # Optional file logging with size-based rotation (lumberjack).
-  # Enabled only when both dir and filename are set; otherwise logs go to stderr.
-  log:
-    # dir: /var/log/domain-dispatcher
-    # filename: app.log
-    max_size: 100                  # Max size (MB) of one log file before rotation
-    max_backups: 10                # Max number of rotated files to keep
+# Optional file logging with size-based rotation (lumberjack).
+# Enabled only when both dir and filename are set; otherwise logs go to stderr.
+log:
+  # dir: /var/log/domain-dispatcher
+  # filename: app.log
+  max_size: 100                    # Max size (MB) of one log file before rotation
+  max_backups: 10                  # Max number of rotated files to keep
 
-  # Reject requests whose source IP matches an entry below with 403.
-  # Entries are individual IPs or CIDR ranges.
-  source_ip_blacklist: []
-  # source_ip_blacklist:
-  #   - 203.0.113.7
-  #   - 192.168.0.0/16
+# Reject requests whose source IP matches an entry below with 403.
+# Entries are individual IPs or CIDR ranges.
+source_ip_blacklist: []
+# source_ip_blacklist:
+#   - 203.0.113.7
+#   - 192.168.0.0/16
 
-  # Add X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host to forwarded requests.
-  # A client-supplied X-Forwarded-For is preserved and the real source appended; the
-  # other two are only filled when absent. Do not trust these headers upstream when
-  # the listener is exposed to untrusted clients; strip them per rule with
-  # remove_headers.
-  add_proxy_headers: true
+# Add X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host to forwarded requests.
+# A client-supplied X-Forwarded-For is preserved and the real source appended; the
+# other two are only filled when absent. Do not trust these headers upstream when
+# the listener is exposed to untrusted clients; strip them per rule with
+# remove_headers.
+add_proxy_headers: true
 
-  # Extra per-request detail logs; the one-line request summary is always printed
-  debug: false
+# Extra per-request detail logs; the one-line request summary is always printed
+debug: false
 
 # -----------------------------------------------------------------------------
 # Listeners

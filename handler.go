@@ -18,12 +18,12 @@ import (
 
 // serveHTTP handles one request and prints the unified access log line once the
 // response has been produced, so every branch is covered exactly once.
-func serveHTTP(w http.ResponseWriter, r *http.Request, listener ListenerConfig, fwd *forwarder.Forwarder, global *GlobalConfig) {
+func serveHTTP(w http.ResponseWriter, r *http.Request, listener ListenerConfig, fwd *forwarder.Forwarder, settings *GlobalConfig) {
 	start := time.Now()
 	reqID := ensureRequestID(r)
 	lw := &loggingResponseWriter{ResponseWriter: w}
 
-	target := handleRequest(lw, r, reqID, listener, fwd, global)
+	target := handleRequest(lw, r, reqID, listener, fwd, settings)
 
 	status := lw.status
 	if status == 0 {
@@ -34,12 +34,12 @@ func serveHTTP(w http.ResponseWriter, r *http.Request, listener ListenerConfig, 
 
 // handleRequest routes one request through the listener's dispatch rules and
 // returns the upstream target for the access log ("-" when none was selected).
-func handleRequest(w http.ResponseWriter, r *http.Request, reqID string, listener ListenerConfig, fwd *forwarder.Forwarder, global *GlobalConfig) string {
+func handleRequest(w http.ResponseWriter, r *http.Request, reqID string, listener ListenerConfig, fwd *forwarder.Forwarder, settings *GlobalConfig) string {
 	host := requestHost(r)
 
 	// Check source IP blacklist
-	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && forwarder.IPBlacklisted(global.SourceIPBlacklist, clientIP) {
-		if global.Debug {
+	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && forwarder.IPBlacklisted(settings.SourceIPBlacklist, clientIP) {
+		if settings.Debug {
 			log.Printf("[Port %d] id=%s [BLOCKED] source=%s - IP is blacklisted", listener.Port, reqID, r.RemoteAddr)
 		}
 		http.Error(w, "Forbidden: request is not allowed", http.StatusForbidden)
@@ -56,7 +56,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, reqID string, listene
 
 	switch rule.Type {
 	case RuleTypeMock:
-		if global.Debug {
+		if settings.Debug {
 			log.Printf("[Port %d] id=%s Mock response for %s (status=%d)", listener.Port, reqID, host, rule.MockStatus)
 		}
 		for k, v := range rule.MockHeaders {
@@ -76,7 +76,7 @@ func handleRequest(w http.ResponseWriter, r *http.Request, reqID string, listene
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return "-"
 		}
-		if global.Debug {
+		if settings.Debug {
 			log.Printf("[Port %d] id=%s Redirecting %s to %s", listener.Port, reqID, host, redactTarget(targetURL))
 		}
 		http.Redirect(w, r, targetURL, http.StatusFound) // 302 redirect
@@ -88,14 +88,14 @@ func handleRequest(w http.ResponseWriter, r *http.Request, reqID string, listene
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return "-"
 		}
-		if global.AddProxyHeaders {
+		if settings.AddProxyHeaders {
 			scheme := "http"
 			if listener.Type == ListenerTypeHTTPS {
 				scheme = "https"
 			}
 			forwarder.AddForwardedHeaders(r, scheme)
 		}
-		if global.Debug {
+		if settings.Debug {
 			log.Printf("[Port %d] id=%s Forwarding %s to %s", listener.Port, reqID, host, redactTarget(targetURL))
 		}
 		hostOverride := ""

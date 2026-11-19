@@ -132,14 +132,14 @@ reload).
 ## Logs
 
 Logs go to journald by default; file logging with size-based rotation can be
-enabled via `global.log` in the configuration.
+enabled via `log` in the configuration.
 
 ```bash
 sudo journalctl -u domain-dispatcher -f         # follow in real time
 sudo journalctl -u domain-dispatcher -n 100     # last 100 lines
 ```
 
-Every request prints one summary line; set `global.debug: true` for
+Every request prints one summary line; set `debug: true` for
 additional per-rule detail.
 
 ## Troubleshooting

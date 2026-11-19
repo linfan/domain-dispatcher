@@ -23,7 +23,7 @@ Building, cross-platform releases and Linux/systemd deployment are covered in
 - **Source IP blacklist**: Reject individual IPs or CIDR ranges with 403
 - **Graceful shutdown**: SIGINT/SIGTERM stops accepting connections and drains in-flight requests within `server.shutdown_timeout`
 - **Per-request summary log**: One line for every request (forward, redirect, mock, and 403/404/500), including a generated or propagated `X-Request-ID`; query strings and userinfo in target URLs are redacted
-- **Optional file logging**: Size-based rotation via `global.log`
+- **Optional file logging**: Size-based rotation via `log`
 - **YAML configuration**: Multiple listeners, each with its own rule set
 
 ## Quick Start
@@ -75,21 +75,20 @@ See `config.example.yaml` for the fully annotated reference. Every value shown t
 the built-in default, so an omitted key keeps its default. A minimal example:
 
 ```yaml
-global:
-  forward:
-    request_timeout: 60s             # max wait for upstream response headers
-    stream_idle_timeout: 120s        # abort a body that stalls this long (0s = off)
-    response_body_timeout: 300s      # total cap for non-streaming bodies (0s = off)
-  server:
-    shutdown_timeout: 30s
-  log:                               # optional; omit for stderr
-    dir: /var/log/domain-dispatcher
-    filename: app.log
-  add_proxy_headers: true
-  source_ip_blacklist:
-    - 203.0.113.7
-    - 192.168.0.0/16
-  debug: false
+transport:
+  request_timeout: 60s               # max wait for upstream response headers
+  stream_idle_timeout: 120s          # abort a body that stalls this long (0s = off)
+  response_body_timeout: 300s        # total cap for non-streaming bodies (0s = off)
+server:
+  shutdown_timeout: 30s
+log:                                 # optional; omit for stderr
+  dir: /var/log/domain-dispatcher
+  filename: app.log
+add_proxy_headers: true
+source_ip_blacklist:
+  - 203.0.113.7
+  - 192.168.0.0/16
+debug: false
 
 listeners:
   - port: 8080
@@ -136,21 +135,21 @@ listeners:
 
 ### Configuration Fields
 
-- `global.forward`: Shared forwarding-engine parameters (connection pool,
+- `transport`: Shared upstream transport parameters (connection pool,
   dial/TLS timeouts, `request_timeout`, `stream_idle_timeout`,
   `response_body_timeout`, `streaming_flush`, `disable_compression`,
   `force_attempt_http2`, `buffer_size`)
-- `global.server`: HTTP server settings applied to every listener
+- `server`: HTTP server settings applied to every listener
   (`read_header_timeout`, `idle_timeout`, `max_header_bytes`, `shutdown_timeout`)
-- `global.log`: Optional file logging with rotation (`dir`, `filename`,
+- `log`: Optional file logging with rotation (`dir`, `filename`,
   `max_size` MB, `max_backups`); logs go to stderr when `dir`/`filename` are empty
-- `global.source_ip_blacklist`: Client IPs or CIDR ranges rejected with 403
-- `global.add_proxy_headers`: Add `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
+- `source_ip_blacklist`: Client IPs or CIDR ranges rejected with 403
+- `add_proxy_headers`: Add `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
   to forwarded requests (default true). A client-supplied `X-Forwarded-For` is preserved
   and the real source is appended; the other two headers are only filled when absent.
   Do not trust these headers upstream when the listener is exposed to untrusted clients;
   strip them with a rule's `remove_headers`
-- `global.debug`: Print extra per-request detail logs (the summary line is always printed)
+- `debug`: Print extra per-request detail logs (the summary line is always printed)
 - `listeners`: Array of listeners
   - `port`: Listen port (1-65535)
   - `type`: `http` (default) or `https`

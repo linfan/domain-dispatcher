@@ -2,8 +2,48 @@ package main
 
 import (
 	"crypto/tls"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestLoadExampleConfig(t *testing.T) {
+	cfg, err := LoadConfig("config.example.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig(config.example.yaml) error = %v", err)
+	}
+	if cfg.Transport.BufferSize != 32*1024 {
+		t.Errorf("transport.buffer_size = %d, want %d", cfg.Transport.BufferSize, 32*1024)
+	}
+	if !cfg.AddProxyHeaders {
+		t.Error("add_proxy_headers = false, want true")
+	}
+	if len(cfg.Listeners) == 0 {
+		t.Fatal("no listeners loaded")
+	}
+}
+
+func TestLoadConfigRejectsLegacyGlobalSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	legacy := `
+global:
+  debug: true
+listeners:
+  - port: 8080
+    dispatch:
+      - domain: api.example.com
+        forward_to: http://127.0.0.1:9000
+`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), `the "global" section was removed`) {
+		t.Fatalf("LoadConfig() error = %v, want legacy global section error", err)
+	}
+}
 
 func TestNormalizeConfigDomains(t *testing.T) {
 	cfg := defaultConfig()

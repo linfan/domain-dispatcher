@@ -53,12 +53,12 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	// Redirect logs to file if configured
-	if cfg.Global.Log.Enabled() {
-		logFile := filepath.Join(cfg.Global.Log.Dir, cfg.Global.Log.Filename)
+	if cfg.Log.Enabled() {
+		logFile := filepath.Join(cfg.Log.Dir, cfg.Log.Filename)
 		logger := &lumberjack.Logger{
 			Filename:   logFile,
-			MaxSize:    cfg.Global.Log.MaxSize,
-			MaxBackups: cfg.Global.Log.MaxBackups,
+			MaxSize:    cfg.Log.MaxSize,
+			MaxBackups: cfg.Log.MaxBackups,
 		}
 		// lumberjack reports open failures through Write and log.Logger discards
 		// write errors silently, so probe the target before switching output.
@@ -67,7 +67,7 @@ func main() {
 		} else {
 			log.SetOutput(logger)
 			log.Printf("Logging to file: %s (max_size=%dMB, max_backups=%d)",
-				logFile, cfg.Global.Log.MaxSize, cfg.Global.Log.MaxBackups)
+				logFile, cfg.Log.MaxSize, cfg.Log.MaxBackups)
 		}
 	}
 
@@ -78,7 +78,7 @@ func main() {
 	// Create the forwarding engine with the shared configuration. The engine
 	// strips the client Accept-Encoding so that a compressing upstream cannot
 	// buffer for example SSE streams.
-	engine := forwarder.New(cfg.Global.Forward.EngineConfig(cfg.Global.Forward.CompressionDisabled()))
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
 
 	// Build one HTTP server per listener
 	servers := make([]*http.Server, 0, len(cfg.Listeners))
@@ -91,7 +91,7 @@ func main() {
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			serveHTTP(w, r, listener, engine, &cfg.Global)
+			serveHTTP(w, r, listener, engine, &cfg.GlobalConfig)
 		})
 
 		srv := &http.Server{
@@ -101,9 +101,9 @@ func main() {
 			// for as long as the upstream and the watchdogs allow.
 			ReadTimeout:       0,
 			WriteTimeout:      0,
-			IdleTimeout:       cfg.Global.Server.IdleTimeout,
-			ReadHeaderTimeout: cfg.Global.Server.ReadHeaderTimeout,
-			MaxHeaderBytes:    cfg.Global.Server.MaxHeaderBytes,
+			IdleTimeout:       cfg.Server.IdleTimeout,
+			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 		}
 		if listener.Type == ListenerTypeHTTPS {
 			tlsConfig, err := buildTLSConfig(listener)
@@ -147,7 +147,7 @@ func main() {
 	}
 
 	// Graceful shutdown: all listeners share a single timeout budget.
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Global.Server.ShutdownTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 	var wg sync.WaitGroup
 	for _, srv := range servers {

@@ -119,11 +119,11 @@ func TestForwardRewrite(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 
-	engine := forwarder.New(cfg.Global.Forward.EngineConfig(cfg.Global.Forward.CompressionDisabled()))
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
 	req := httptest.NewRequest(http.MethodGet, "http://api.example.com/api/v1/users/42?verbose=1", nil)
 	rec := httptest.NewRecorder()
 
-	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.Global)
+	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
@@ -300,7 +300,7 @@ func TestServeHTTPLogsAccessAndPropagatesRequestID(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	engine := forwarder.New(cfg.Global.Forward.EngineConfig(cfg.Global.Forward.CompressionDisabled()))
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
 
 	var logs bytes.Buffer
 	oldOutput := log.Writer()
@@ -309,7 +309,7 @@ func TestServeHTTPLogsAccessAndPropagatesRequestID(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "http://api.example.com/hello?token=secret", nil)
 	rec := httptest.NewRecorder()
-	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.Global)
+	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -350,7 +350,7 @@ func TestServeHTTPLogs502OnForwardFailure(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	engine := forwarder.New(cfg.Global.Forward.EngineConfig(cfg.Global.Forward.CompressionDisabled()))
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
 
 	var logs bytes.Buffer
 	oldOutput := log.Writer()
@@ -359,7 +359,7 @@ func TestServeHTTPLogs502OnForwardFailure(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "http://api.example.com/fail?token=secret", nil)
 	rec := httptest.NewRecorder()
-	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.Global)
+	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)

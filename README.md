@@ -23,7 +23,7 @@
 - **每请求摘要日志**：每个请求（forward、redirect、mock 以及 403/404/500）都输出一行
   摘要，包含自动生成或沿用的 `X-Request-ID`（并透传给上游）；目标 URL 的查询串与
   userinfo 会脱敏
-- **可选文件日志**：通过 `global.log` 按文件大小滚动
+- **可选文件日志**：通过 `log` 按文件大小滚动
 - **YAML 配置**：可配置多个监听端口，每个监听器拥有各自的规则集
 
 ## 快速开始
@@ -73,21 +73,20 @@ curl -H "Host: unknown.com" http://127.0.0.1:8080/
 因此省略某个键即沿用其默认配置。最小示例：
 
 ```yaml
-global:
-  forward:
-    request_timeout: 60s             # 等待上游响应头的最长时间
-    stream_idle_timeout: 120s        # 正文停滞达到该时长即中断（0s 表示关闭）
-    response_body_timeout: 300s      # 非流式正文的总时长上限（0s 表示关闭）
-  server:
-    shutdown_timeout: 30s
-  log:                               # 可选；不配置则输出到 stderr
-    dir: /var/log/domain-dispatcher
-    filename: app.log
-  add_proxy_headers: true
-  source_ip_blacklist:
-    - 203.0.113.7
-    - 192.168.0.0/16
-  debug: false
+transport:
+  request_timeout: 60s               # 等待上游响应头的最长时间
+  stream_idle_timeout: 120s          # 正文停滞达到该时长即中断（0s 表示关闭）
+  response_body_timeout: 300s        # 非流式正文的总时长上限（0s 表示关闭）
+server:
+  shutdown_timeout: 30s
+log:                                 # 可选；不配置则输出到 stderr
+  dir: /var/log/domain-dispatcher
+  filename: app.log
+add_proxy_headers: true
+source_ip_blacklist:
+  - 203.0.113.7
+  - 192.168.0.0/16
+debug: false
 
 listeners:
   - port: 8080
@@ -134,19 +133,19 @@ listeners:
 
 ### 配置字段说明
 
-- `global.forward`：转发引擎的共享参数（连接池、拨号/TLS 超时、`request_timeout`、
+- `transport`：上游传输的共享参数（连接池、拨号/TLS 超时、`request_timeout`、
   `stream_idle_timeout`、`response_body_timeout`、`streaming_flush`、
   `disable_compression`、`force_attempt_http2`、`buffer_size`）
-- `global.server`：作用于所有监听器的 HTTP 服务端设置（`read_header_timeout`、
+- `server`：作用于所有监听器的 HTTP 服务端设置（`read_header_timeout`、
   `idle_timeout`、`max_header_bytes`、`shutdown_timeout`）
-- `global.log`：可选的带滚动的文件日志（`dir`、`filename`、`max_size`（MB）、
+- `log`：可选的带滚动的文件日志（`dir`、`filename`、`max_size`（MB）、
   `max_backups`）；`dir`/`filename` 为空时日志输出到 stderr
-- `global.source_ip_blacklist`：以 403 拒绝的客户端 IP 或 CIDR 网段
-- `global.add_proxy_headers`：为转发的请求添加 `X-Forwarded-For`/`X-Forwarded-Proto`/
+- `source_ip_blacklist`：以 403 拒绝的客户端 IP 或 CIDR 网段
+- `add_proxy_headers`：为转发的请求添加 `X-Forwarded-For`/`X-Forwarded-Proto`/
   `X-Forwarded-Host`（默认 true）。客户端已有的 `X-Forwarded-For` 会被保留并在末尾追加
   真实来源，`X-Forwarded-Proto`/`X-Forwarded-Host` 仅在缺失时补充；若监听端口直接暴露
   给不可信客户端，上游不应信任这些头，可用规则的 `remove_headers` 将其移除
-- `global.debug`：输出额外的每请求明细日志（摘要日志始终输出）
+- `debug`：输出额外的每请求明细日志（摘要日志始终输出）
 - `listeners`：监听器数组
   - `port`：监听端口（1-65535）
   - `type`：`http`（默认）或 `https`

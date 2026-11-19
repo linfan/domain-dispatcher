@@ -38,11 +38,11 @@ type TLSConfig struct {
 	KeyFile  string `yaml:"key_file"`
 }
 
-// ForwardConfig represents the forwarding engine configuration. The plain
-// values are prepopulated with defaults before the YAML file is overlaid, so
-// explicitly configured zeros stay zero; the two *bool fields are tri-state
-// (unset = default via the accessors).
-type ForwardConfig struct {
+// TransportConfig represents the upstream transport configuration used by the
+// forwarding engine. The plain values are prepopulated with defaults before the
+// YAML file is overlaid, so explicitly configured zeros stay zero; the two
+// *bool fields are tri-state (unset = default via the accessors).
+type TransportConfig struct {
 	BufferSize            int           `yaml:"buffer_size"`
 	MaxIdleConns          int           `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost   int           `yaml:"max_idle_conns_per_host"`
@@ -63,24 +63,24 @@ type ForwardConfig struct {
 
 // StreamingFlushEnabled reports whether streaming responses are relayed chunk by
 // chunk with an explicit flush after each chunk (default true).
-func (fc *ForwardConfig) StreamingFlushEnabled() bool {
+func (fc *TransportConfig) StreamingFlushEnabled() bool {
 	return fc.StreamingFlush == nil || *fc.StreamingFlush
 }
 
 // CompressionDisabled reports whether compression negotiation with the upstream
 // is disabled (default true). A compressing gateway buffers SSE streams in the
 // compressor, so events pile up there and reach the client in bursts.
-func (fc *ForwardConfig) CompressionDisabled() bool {
+func (fc *TransportConfig) CompressionDisabled() bool {
 	return fc.DisableCompression == nil || *fc.DisableCompression
 }
 
-// Validate checks the forward section for semantic errors.
-func (fc *ForwardConfig) Validate() error {
+// Validate checks the transport section for semantic errors.
+func (fc *TransportConfig) Validate() error {
 	if fc.BufferSize <= 0 {
-		return fmt.Errorf("forward.buffer_size must be positive, got %d", fc.BufferSize)
+		return fmt.Errorf("transport.buffer_size must be positive, got %d", fc.BufferSize)
 	}
 	if fc.MaxIdleConns < 0 || fc.MaxIdleConnsPerHost < 0 || fc.MaxConnsPerHost < 0 {
-		return fmt.Errorf("forward connection pool sizes must not be negative")
+		return fmt.Errorf("transport connection pool sizes must not be negative")
 	}
 	for _, d := range []struct {
 		name  string
@@ -97,17 +97,17 @@ func (fc *ForwardConfig) Validate() error {
 		{"response_body_timeout", fc.ResponseBodyTimeout},
 	} {
 		if d.value < 0 {
-			return fmt.Errorf("forward.%s must not be negative, got %s", d.name, d.value)
+			return fmt.Errorf("transport.%s must not be negative, got %s", d.name, d.value)
 		}
 	}
 	return nil
 }
 
-// EngineConfig converts the YAML forward section into the shared forwarding
+// EngineConfig converts the YAML transport section into the shared forwarding
 // engine configuration. stripAcceptEncoding drops the client's Accept-Encoding
 // before forwarding: gateways that must not let the upstream compress set it,
 // transparent forward proxies leave it false.
-func (fc *ForwardConfig) EngineConfig(stripAcceptEncoding bool) forwarder.Config {
+func (fc *TransportConfig) EngineConfig(stripAcceptEncoding bool) forwarder.Config {
 	return forwarder.Config{
 		BufferSize:            fc.BufferSize,
 		MaxIdleConns:          fc.MaxIdleConns,
@@ -196,26 +196,28 @@ type ListenerConfig struct {
 	Dispatch []DispatchRule `yaml:"dispatch"`
 }
 
-// GlobalConfig represents the global application configuration
+// GlobalConfig represents the settings shared by all listeners. Its keys are
+// inlined at the top level of the configuration file.
 type GlobalConfig struct {
-	Forward           ForwardConfig `yaml:"forward"`
-	Server            ServerConfig  `yaml:"server"`
-	Log               LogConfig     `yaml:"log"`
-	SourceIPBlacklist []string      `yaml:"source_ip_blacklist"`
-	AddProxyHeaders   bool          `yaml:"add_proxy_headers"` // Add X-Forwarded-For/Proto/Host when forwarding
-	Debug             bool          `yaml:"debug"`
+	Transport         TransportConfig `yaml:"transport"`
+	Server            ServerConfig    `yaml:"server"`
+	Log               LogConfig       `yaml:"log"`
+	SourceIPBlacklist []string        `yaml:"source_ip_blacklist"`
+	AddProxyHeaders   bool            `yaml:"add_proxy_headers"` // Add X-Forwarded-For/Proto/Host when forwarding
+	Debug             bool            `yaml:"debug"`
 }
 
-// Config represents the application configuration
+// Config represents the application configuration. The global settings are
+// inlined at the top level; only listeners is nested.
 type Config struct {
-	Global    GlobalConfig     `yaml:"global"`
-	Listeners []ListenerConfig `yaml:"listeners"`
+	GlobalConfig `yaml:",inline"`
+	Listeners    []ListenerConfig `yaml:"listeners"`
 }
 
-// defaultForwardConfig returns the built-in forward section defaults. The
+// defaultTransportConfig returns the built-in transport section defaults. The
 // values mirror pkg/forwarder.DefaultConfig; keep the two in sync.
-func defaultForwardConfig() ForwardConfig {
-	return ForwardConfig{
+func defaultTransportConfig() TransportConfig {
+	return TransportConfig{
 		BufferSize:            32 * 1024,
 		MaxIdleConns:          1000,
 		MaxIdleConnsPerHost:   100,
@@ -235,8 +237,8 @@ func defaultForwardConfig() ForwardConfig {
 // on top, so values omitted there keep these defaults.
 func defaultConfig() *Config {
 	return &Config{
-		Global: GlobalConfig{
-			Forward: defaultForwardConfig(),
+		GlobalConfig: GlobalConfig{
+			Transport: defaultTransportConfig(),
 			Server: ServerConfig{
 				ReadHeaderTimeout: 10 * time.Second,
 				IdleTimeout:       120 * time.Second,
@@ -260,6 +262,19 @@ func LoadConfig(filename string) (*Config, error) {
 	cfg := defaultConfig()
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// The pre-restructure layout nested these keys under "global". Unknown keys
+	// are ignored by the YAML decoder, so reject the old layout explicitly
+	// instead of silently running with defaults (e.g. an empty IP blacklist).
+	var legacy struct {
+		Global *yaml.Node `yaml:"global"`
+	}
+	if err := yaml.Unmarshal(data, &legacy); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if legacy.Global != nil {
+		return nil, fmt.Errorf(`config: the "global" section was removed; move its keys to the top level (global.forward is now transport)`)
 	}
 
 	normalize(cfg)
@@ -302,20 +317,20 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("no listeners configured")
 	}
 
-	if err := cfg.Global.Forward.Validate(); err != nil {
+	if err := cfg.Transport.Validate(); err != nil {
 		return err
 	}
 
-	if cfg.Global.Server.MaxHeaderBytes <= 0 {
-		return fmt.Errorf("global.server.max_header_bytes must be positive, got %d", cfg.Global.Server.MaxHeaderBytes)
+	if cfg.Server.MaxHeaderBytes <= 0 {
+		return fmt.Errorf("server.max_header_bytes must be positive, got %d", cfg.Server.MaxHeaderBytes)
 	}
-	if cfg.Global.Server.ReadHeaderTimeout < 0 || cfg.Global.Server.IdleTimeout < 0 || cfg.Global.Server.ShutdownTimeout < 0 {
-		return fmt.Errorf("global.server timeouts must not be negative")
+	if cfg.Server.ReadHeaderTimeout < 0 || cfg.Server.IdleTimeout < 0 || cfg.Server.ShutdownTimeout < 0 {
+		return fmt.Errorf("server timeouts must not be negative")
 	}
 
-	for _, entry := range cfg.Global.SourceIPBlacklist {
+	for _, entry := range cfg.SourceIPBlacklist {
 		if err := validateBlacklistEntry(entry); err != nil {
-			return fmt.Errorf("global.source_ip_blacklist: %w", err)
+			return fmt.Errorf("source_ip_blacklist: %w", err)
 		}
 	}
 
