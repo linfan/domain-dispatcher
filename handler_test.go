@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"domain-dispatcher/pkg/forwarder"
 )
@@ -138,6 +140,197 @@ func TestForwardRewrite(t *testing.T) {
 		}
 	default:
 		t.Fatal("upstream did not receive the request")
+	}
+}
+
+func TestForwardEditOverwritesHeaders(t *testing.T) {
+	got := make(chan http.Header, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := defaultConfig()
+	cfg.Listeners = []ListenerConfig{{
+		Port: 8080,
+		Type: ListenerTypeHTTP,
+		Dispatch: []DispatchRule{{
+			Domain:    "api.example.com",
+			ForwardTo: upstream.URL,
+			Type:      RuleTypeForward,
+			Edit: &EditConfig{
+				Enabled: true,
+				AddHeaders: map[string]string{
+					"X-Environment": "staging",
+					"X-Client":      "replaced",
+				},
+			},
+		}},
+	}}
+	normalize(cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
+
+	req := httptest.NewRequest(http.MethodGet, "http://api.example.com/hello", nil)
+	req.Header.Set("X-Client", "original")
+	rec := httptest.NewRecorder()
+	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	select {
+	case h := <-got:
+		if h.Get("X-Environment") != "staging" {
+			t.Errorf("upstream X-Environment = %q, want %q", h.Get("X-Environment"), "staging")
+		}
+		if h.Get("X-Client") != "replaced" {
+			t.Errorf("upstream X-Client = %q, want %q (edit must overwrite client header)", h.Get("X-Client"), "replaced")
+		}
+	default:
+		t.Fatal("upstream did not receive the request")
+	}
+}
+
+func TestForwardMirrorDeliversCopy(t *testing.T) {
+	type delivered struct {
+		method string
+		uri    string
+		host   string
+		body   string
+		header http.Header
+	}
+	mirrorCh := make(chan delivered, 1)
+	mirrorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mirrorCh <- delivered{method: r.Method, uri: r.URL.RequestURI(), host: r.Host, body: string(body), header: r.Header.Clone()}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer mirrorServer.Close()
+
+	upstreamCh := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamCh <- string(body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := defaultConfig()
+	cfg.Listeners = []ListenerConfig{{
+		Port: 8080,
+		Type: ListenerTypeHTTP,
+		Dispatch: []DispatchRule{{
+			Domain:        "api.example.com",
+			ForwardTo:     upstream.URL + "/base",
+			Type:          RuleTypeForward,
+			RemoveHeaders: []string{"X-Remove-Me"},
+			Edit: &EditConfig{
+				Enabled:    true,
+				AddHeaders: map[string]string{"X-Environment": "staging"},
+			},
+			Mirror: &MirrorConfig{Enabled: true, Target: mirrorServer.URL},
+		}},
+	}}
+	normalize(cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	cfg.PrepareRuntime()
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/api/items?id=7", strings.NewReader("payload"))
+	req.Header.Set("X-Remove-Me", "secret")
+	rec := httptest.NewRecorder()
+	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	select {
+	case body := <-upstreamCh:
+		if body != "payload" {
+			t.Errorf("upstream body = %q, want %q", body, "payload")
+		}
+	default:
+		t.Fatal("upstream did not receive the request")
+	}
+
+	wantMirrorHost := strings.TrimPrefix(mirrorServer.URL, "http://")
+	select {
+	case d := <-mirrorCh:
+		if d.method != http.MethodPost {
+			t.Errorf("mirror method = %q, want %q", d.method, http.MethodPost)
+		}
+		if d.uri != "/base/api/items?id=7" {
+			t.Errorf("mirror URI = %q, want %q", d.uri, "/base/api/items?id=7")
+		}
+		if d.body != "payload" {
+			t.Errorf("mirror body = %q, want %q", d.body, "payload")
+		}
+		if d.host != wantMirrorHost {
+			t.Errorf("mirror Host = %q, want %q", d.host, wantMirrorHost)
+		}
+		if d.header.Get("X-Environment") != "staging" {
+			t.Errorf("mirror X-Environment = %q, want %q", d.header.Get("X-Environment"), "staging")
+		}
+		if d.header.Get("X-Remove-Me") != "" {
+			t.Errorf("mirror kept removed header X-Remove-Me = %q", d.header.Get("X-Remove-Me"))
+		}
+		if d.header.Get("X-Forwarded-Host") != "api.example.com" {
+			t.Errorf("mirror X-Forwarded-Host = %q, want %q", d.header.Get("X-Forwarded-Host"), "api.example.com")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("mirror did not receive the request")
+	}
+}
+
+func TestForwardMirrorSkipsOversizedBody(t *testing.T) {
+	mirrored := make(chan struct{}, 1)
+	mirrorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mirrored <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mirrorServer.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := defaultConfig()
+	cfg.Listeners = []ListenerConfig{{
+		Port: 8080,
+		Type: ListenerTypeHTTP,
+		Dispatch: []DispatchRule{{
+			Domain:    "api.example.com",
+			ForwardTo: upstream.URL,
+			Type:      RuleTypeForward,
+			Mirror:    &MirrorConfig{Enabled: true, Target: mirrorServer.URL, MaxBodyBytes: 4},
+		}},
+	}}
+	normalize(cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	cfg.PrepareRuntime()
+	engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
+
+	req := httptest.NewRequest(http.MethodPost, "http://api.example.com/upload", strings.NewReader("0123456789"))
+	rec := httptest.NewRecorder()
+	serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	select {
+	case <-mirrored:
+		t.Fatal("oversized body was mirrored")
+	case <-time.After(200 * time.Millisecond):
 	}
 }
 

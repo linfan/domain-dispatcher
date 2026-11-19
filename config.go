@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -174,6 +175,58 @@ func (u *URLRewrite) Apply(path string) string {
 	return u.re.ReplaceAllString(path, u.Replacement)
 }
 
+// EditConfig configures request edits applied before a forward rule's request
+// is sent upstream. AddHeaders sets (overwrites) headers on every forwarded
+// request after add_proxy_headers has run.
+type EditConfig struct {
+	Enabled    bool              `yaml:"enabled"`
+	AddHeaders map[string]string `yaml:"add_headers"`
+}
+
+// MirrorConfig configures best-effort traffic mirroring for a forward rule:
+// every forwarded request is also delivered, asynchronously, to Target.
+// Delivery failures and queue overflow never affect the original request.
+type MirrorConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	Target       string        `yaml:"target"`         // Absolute http(s) base URL; the forwarded path and query are appended
+	Timeout      time.Duration `yaml:"timeout"`        // Per-delivery timeout (default 5s)
+	MaxBodyBytes int64         `yaml:"max_body_bytes"` // Max request body captured; larger bodies are not mirrored (default 1MiB)
+	QueueSize    int           `yaml:"queue_size"`     // Pending mirror jobs; overflow is dropped (default 256)
+}
+
+// Validate checks the mirror section for semantic errors.
+func (mc *MirrorConfig) Validate() error {
+	if !mc.Enabled {
+		return nil
+	}
+	if mc.Target == "" {
+		return fmt.Errorf("mirror.target is required when mirror is enabled")
+	}
+	u, err := url.Parse(mc.Target)
+	if err != nil {
+		return fmt.Errorf("mirror.target: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("mirror.target %q must use http or https", mc.Target)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("mirror.target %q has no host", mc.Target)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("mirror.target %q must not contain a query or fragment", mc.Target)
+	}
+	if mc.Timeout <= 0 {
+		return fmt.Errorf("mirror.timeout must be positive, got %s", mc.Timeout)
+	}
+	if mc.MaxBodyBytes < 0 {
+		return fmt.Errorf("mirror.max_body_bytes must not be negative, got %d", mc.MaxBodyBytes)
+	}
+	if mc.QueueSize <= 0 {
+		return fmt.Errorf("mirror.queue_size must be positive, got %d", mc.QueueSize)
+	}
+	return nil
+}
+
 // DispatchRule represents a single domain dispatch rule
 type DispatchRule struct {
 	Domain        string            `yaml:"domain"`
@@ -184,9 +237,13 @@ type DispatchRule struct {
 	TLS           *TLSConfig        `yaml:"tls"`            // TLS certificate for this domain (https listeners only)
 	RemoveHeaders []string          `yaml:"remove_headers"` // Headers to remove before forwarding (only for forward type)
 	Rewrite       *RewriteConfig    `yaml:"rewrite"`        // Domain and URL rewrites (only for forward type)
+	Edit          *EditConfig       `yaml:"edit"`           // Request header edits (only for forward type)
+	Mirror        *MirrorConfig     `yaml:"mirror"`         // Async traffic mirroring (only for forward type)
 	MockStatus    int               `yaml:"mock_status"`    // HTTP status code for mock response (default 200, only for mock type)
 	MockHeaders   map[string]string `yaml:"mock_headers"`   // Response headers for mock type
 	MockBody      string            `yaml:"mock_body"`      // Response body for mock type
+
+	mirror *forwarder.Mirror // Runtime mirror queue, built by PrepareRuntime
 }
 
 // ListenerConfig represents the configuration for a single port listener
@@ -313,6 +370,45 @@ func normalize(cfg *Config) {
 			if rule.Type == RuleTypeMock && rule.MockStatus == 0 {
 				rule.MockStatus = http.StatusOK
 			}
+			if rule.Mirror != nil && rule.Mirror.Enabled {
+				// Per-rule slices cannot be prepopulated before the YAML is
+				// overlaid, so omitted fields get their defaults here. Explicit
+				// zeros are indistinguishable from omitted ones.
+				if rule.Mirror.Timeout == 0 {
+					rule.Mirror.Timeout = 5 * time.Second
+				}
+				if rule.Mirror.MaxBodyBytes == 0 {
+					rule.Mirror.MaxBodyBytes = 1 << 20
+				}
+				if rule.Mirror.QueueSize == 0 {
+					rule.Mirror.QueueSize = 256
+				}
+			}
+		}
+	}
+}
+
+// PrepareRuntime builds the per-rule runtime state that cannot come from YAML:
+// mirror delivery queues are created here so their workers start once at
+// startup rather than per request. Call it after LoadConfig and before serving.
+func (cfg *Config) PrepareRuntime() {
+	for i := range cfg.Listeners {
+		for j := range cfg.Listeners[i].Dispatch {
+			rule := &cfg.Listeners[i].Dispatch[j]
+			if rule.Mirror == nil || !rule.Mirror.Enabled {
+				continue
+			}
+			target, err := url.Parse(rule.Mirror.Target)
+			if err != nil {
+				continue // Validate reports this before startup
+			}
+			rule.mirror = forwarder.NewMirror(forwarder.MirrorConfig{
+				Target:       target,
+				Timeout:      rule.Mirror.Timeout,
+				MaxBodyBytes: rule.Mirror.MaxBodyBytes,
+				QueueSize:    rule.Mirror.QueueSize,
+				Debug:        cfg.Debug,
+			})
 		}
 	}
 }
@@ -401,6 +497,29 @@ func (cfg *Config) Validate() error {
 			if rule.Type != RuleTypeMock && rule.ForwardTo == "" {
 				return fmt.Errorf("listener %d, rule %d: forward_to cannot be empty", i+1, j+1)
 			}
+			if rule.Type != RuleTypeForward {
+				if rule.Edit != nil {
+					return fmt.Errorf("listener %d, rule %d: edit is only supported for forward rules", i+1, j+1)
+				}
+				if rule.Mirror != nil {
+					return fmt.Errorf("listener %d, rule %d: mirror is only supported for forward rules", i+1, j+1)
+				}
+			}
+			if rule.Edit != nil && rule.Edit.Enabled {
+				for name, value := range rule.Edit.AddHeaders {
+					if !validHeaderName(name) {
+						return fmt.Errorf("listener %d, rule %d: edit.add_headers: invalid header name %q", i+1, j+1, name)
+					}
+					if strings.ContainsAny(value, "\r\n\x00") {
+						return fmt.Errorf("listener %d, rule %d: edit.add_headers.%s: value must not contain CR, LF or NUL", i+1, j+1, name)
+					}
+				}
+			}
+			if rule.Mirror != nil {
+				if err := rule.Mirror.Validate(); err != nil {
+					return fmt.Errorf("listener %d, rule %d: %w", i+1, j+1, err)
+				}
+			}
 			if rule.Rewrite == nil {
 				continue
 			}
@@ -422,6 +541,24 @@ func (cfg *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// validHeaderName reports whether name is an RFC 7230 token, the character set
+// HTTP header field names are restricted to.
+func validHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // validateBlacklistEntry checks a single source_ip_blacklist entry, which may be

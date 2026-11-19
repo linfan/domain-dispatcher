@@ -16,6 +16,8 @@ Building, cross-platform releases and Linux/systemd deployment are covered in
 - **Manual rule priority**: `priority` adds to the automatic match score to order overlapping rules
 - **Multiple dispatch types**: `forward` (reverse proxy), `redirect` (302), `mock` (local canned response)
 - **Header control**: Remove configured headers before forwarding; optionally add `X-Forwarded-*`
+- **Header injection**: `forward` rules can set (overwrite) request headers via `edit.add_headers`
+- **Traffic mirroring**: `forward` rules can asynchronously copy every forwarded request to `mirror.target`; a slow or failing mirror never delays or affects the original request
 - **Forward rewriting**: `forward` rules can override the upstream `Host` header and rewrite the request path with a regular expression
 - **SSE-aware forwarding**: Streaming responses are flushed chunk by chunk and the upstream never negotiates compression, so events are delivered immediately instead of in bursts
 - **Timeouts**: Upstream dial/header/body-idle/body-duration and server read-header/idle timeouts are all configurable
@@ -106,6 +108,18 @@ listeners:
           url:                       # regex substitution on the request path
             pattern: '^/api/v1/(.*)$'
             replacement: '/v2/$1'
+      - domain: mirrored-api.com
+        forward_to: http://127.0.0.1:9000
+        edit:                        # overwrite request headers (optional)
+          enabled: true
+          add_headers:
+            X-Environment: staging
+        mirror:                      # async traffic mirroring (optional)
+          enabled: true
+          target: http://127.0.0.1:9100
+          timeout: 5s
+          max_body_bytes: 1048576
+          queue_size: 256
       - domain: mock-api.com
         path: /health
         type: mock                   # local response, no upstream
@@ -181,6 +195,27 @@ listeners:
         the result is joined with the `forward_to` path prefix and the query
         string is preserved. `replacement` supports capture references such as
         `$1` and `${name}`; `$$` is a literal `$`
+    - `edit`: Optional request header injection (only `forward` rules)
+      - `enabled`: Whether the edits are applied
+      - `add_headers`: Headers to set, overwriting same-name headers. Applied
+        after `add_proxy_headers` and before forwarding; the rule's
+        `remove_headers` still strips a same-name header. Names must be RFC 7230
+        tokens and values must not contain CR, LF or NUL; both are validated at
+        startup
+    - `mirror`: Optional asynchronous traffic mirroring (only `forward` rules)
+      - `enabled`: Whether mirroring is active
+      - `target`: Absolute http(s) base URL without query or fragment. The
+        mirrored URL is `target` + the forwarded path and query
+      - `timeout`: Per-delivery timeout (default 5s)
+      - `max_body_bytes`: Max request body captured (default 1 MiB); larger
+        bodies, or bodies the upstream never fully reads, are not mirrored
+      - `queue_size`: Pending delivery queue length (default 256); overflow is
+        dropped silently
+      - Delivery is asynchronous and best-effort: dial, timeout and overflow
+        failures only affect the mirrored copy and never delay or change the
+        original response. The copy keeps the method and the edited headers
+        (hop-by-hop and `remove_headers` entries are stripped), sends `Host` as
+        the mirror host and carries the original `Host` in `X-Forwarded-Host`
     - `mock_status` / `mock_headers` / `mock_body`: Mock response definition (only `mock`)
 
 ## How It Works
@@ -213,6 +248,11 @@ remaining tie goes to the first configured rule.
   preserved too; with `rewrite.url`, the decoded path is regex-rewritten first
   and then joined with the prefix
 - **Body**: Request body is forwarded as-is, preserving `Content-Length`
+- **Header injection**: `edit.add_headers` overwrites request headers after
+  `add_proxy_headers`; the rule's `remove_headers` still strips a same-name header
+- **Traffic mirroring**: With `mirror` configured, every forwarded request is
+  copied asynchronously to `mirror.target`; delivery failures and queue overflow
+  only affect the copy (see the `mirror` field reference)
 - **WebSocket**: Protocol upgrades are not supported; the hop-by-hop `Upgrade`
   and `Connection` headers are stripped before forwarding
 - **Protocol**: Supports forwarding between HTTP and HTTPS
@@ -227,7 +267,7 @@ domain-dispatcher/
 ├── main.go                      # Flags, startup, graceful shutdown
 ├── config.go                    # Configuration types, defaults, loading, validation
 ├── handler.go                   # Request handling, rule matching, summary logging
-├── pkg/forwarder/forwarder.go   # Shared forwarding engine
+├── pkg/forwarder/               # Shared forwarding engine and mirror delivery
 ├── config.example.yaml          # Annotated config template (copy to config.yaml)
 ├── Makefile                     # Build automation
 ├── scripts/                     # install.sh / uninstall.sh

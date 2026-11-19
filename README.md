@@ -14,6 +14,9 @@
 - **手动规则优先级**：`priority` 会叠加到自动匹配得分上，用于排定相互重叠的规则
 - **多种分发类型**：`forward`（反向代理）、`redirect`（302 重定向）、`mock`（本地预设响应）
 - **请求头控制**：转发前移除指定请求头；可选添加 `X-Forwarded-*`
+- **请求头注入**：`forward` 规则可用 `edit.add_headers` 覆盖式设置请求头
+- **流量镜像**：`forward` 规则可把每个转发请求异步复制一份到 `mirror.target`，
+  慢速或失败的镜像不会延迟或影响原请求
 - **转发改写**：`forward` 规则可覆盖发往上游的 `Host` 头，并用正则替换请求路径
 - **适配 SSE 的转发**：流式响应逐块 flush 输出，且不与上游协商压缩，因此事件即时送达、不会成批堆积
 - **超时配置**：上游拨号、响应头、正文空闲、正文总时长，以及服务端读请求头、空闲超时可全部配置
@@ -104,6 +107,18 @@ listeners:
           url:                       # 对请求路径做正则替换
             pattern: '^/api/v1/(.*)$'
             replacement: '/v2/$1'
+      - domain: mirrored-api.com
+        forward_to: http://127.0.0.1:9000
+        edit:                        # 覆盖式注入请求头（可选）
+          enabled: true
+          add_headers:
+            X-Environment: staging
+        mirror:                      # 异步镜像转发流量（可选）
+          enabled: true
+          target: http://127.0.0.1:9100
+          timeout: 5s
+          max_body_bytes: 1048576
+          queue_size: 256
       - domain: mock-api.com
         path: /health
         type: mock                   # 本地响应，不回源
@@ -171,6 +186,23 @@ listeners:
       - `url`：对请求路径做正则替换（`pattern`、`replacement`），替换结果再与
         `forward_to` 的路径前缀拼接；查询串原样保留。`replacement` 支持 `$1`、
         `${name}` 形式的捕获组引用，`$$` 表示字面量 `$`
+    - `edit`：可选的请求头注入（仅 `forward` 类型生效）
+      - `enabled`：是否启用
+      - `add_headers`：要设置的请求头映射，同名头会被覆盖。在 `add_proxy_headers`
+        之后、转发之前生效；规则的 `remove_headers` 仍会移除同名头。头名称必须为
+        RFC 7230 token，值不得包含 CR、LF 或 NUL，启动时会校验
+    - `mirror`：可选的异步流量镜像（仅 `forward` 类型生效）
+      - `enabled`：是否启用
+      - `target`：http(s) 绝对基础 URL（不含查询串或片段）。镜像 URL 为 `target`
+        前缀加上实际转发的路径与查询串
+      - `timeout`：单次投递超时（默认 5s）
+      - `max_body_bytes`：最多捕获的请求体字节数（默认 1 MiB）；更大的请求体、
+        或上游未完整读取的请求体不会被镜像
+      - `queue_size`：待投递队列长度（默认 256）；队列满时静默丢弃
+      - 投递为异步尽力而为：连接、超时、队列溢出等失败只影响镜像副本，不会延迟
+        或改变原请求的响应。镜像副本保留方法、编辑后的请求头（逐跳头与
+        `remove_headers` 中的头会被剥离），`Host` 为镜像目标主机，原 `Host`
+        通过 `X-Forwarded-Host` 传递
     - `mock_status` / `mock_headers` / `mock_body`：预设响应定义（仅 `mock` 类型生效）
 
 ## 工作原理
@@ -196,6 +228,10 @@ listeners:
   查询参数；未配置 `rewrite.url` 时还会保留请求路径的百分号编码（如 `%2F`）。
   配置 `rewrite.url` 时先按正则替换解码后的路径，再拼接前缀
 - **请求体**：原样转发，并保留 `Content-Length`
+- **请求头注入**：`edit.add_headers` 在 `add_proxy_headers` 之后覆盖式设置请求头；
+  规则的 `remove_headers` 随后仍会剥离同名头
+- **流量镜像**：配置 `mirror` 时，每个转发请求会异步复制到 `mirror.target`；
+  投递失败或队列溢出只影响副本，不影响原请求（详见 `mirror` 字段说明）
 - **WebSocket**：暂不支持协议升级。`Upgrade`/`Connection` 属于逐跳头，会在转发前被剥离
 - **协议**：支持 HTTP 与 HTTPS 之间的互相转发
 - **流式响应**：`text/event-stream` 响应逐块 flush 输出
@@ -208,7 +244,7 @@ domain-dispatcher/
 ├── main.go                      # 命令行参数、启动流程、优雅关闭
 ├── config.go                    # 配置类型、默认值、加载与校验
 ├── handler.go                   # 请求处理、规则匹配、摘要日志
-├── pkg/forwarder/forwarder.go   # 共享转发引擎
+├── pkg/forwarder/               # 共享转发引擎与镜像投递
 ├── config.example.yaml          # 带注释的配置模板（复制为 config.yaml 使用）
 ├── Makefile                     # 构建自动化
 ├── scripts/                     # install.sh / uninstall.sh

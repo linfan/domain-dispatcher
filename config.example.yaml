@@ -97,6 +97,32 @@ listeners:
           url:
             pattern: '^/api/v1/(.*)$'
             replacement: '/v2/$1'
+      # edit and mirror apply to forward rules only.
+      #
+      # edit sets (overwrites) request headers after add_proxy_headers and just
+      # before forwarding. Header names must be RFC 7230 tokens; values must not
+      # contain CR, LF or NUL. remove_headers still strips a same-name header.
+      #
+      # mirror delivers an asynchronous best-effort copy of each forwarded
+      # request to target + the forwarded path/query. A slow, failing or
+      # overloaded mirror never delays or fails the original request. The copy
+      # keeps the method and the edited headers (hop-by-hop and remove_headers
+      # entries are stripped), sends Host as the mirror host and the original
+      # Host in X-Forwarded-Host, and is skipped when its body exceeds
+      # max_body_bytes or the upstream never fully reads it.
+      - domain: mirrored-api.com
+        forward_to: http://127.0.0.1:9000
+        edit:
+          enabled: true
+          add_headers:
+            X-Environment: staging
+            X-Proxy-Name: domain-dispatcher
+        mirror:
+          enabled: true
+          target: http://127.0.0.1:9100  # Absolute http(s) base URL; no query or fragment
+          timeout: 5s                    # Per-delivery timeout (connect + request + response)
+          max_body_bytes: 1048576        # Capture at most 1 MiB of the request body
+          queue_size: 256                # Pending mirror jobs; overflow is dropped silently
       - domain: mock-api.com
         type: mock                 # Respond locally without contacting an upstream
         mock_status: 200           # Optional HTTP status code (default 200)

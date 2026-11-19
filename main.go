@@ -75,6 +75,10 @@ func main() {
 	log.Printf("Loaded configuration from %s", configPath)
 	log.Printf("Loaded %d listeners", len(cfg.Listeners))
 
+	// Build per-rule runtime state (mirror queues) before the listener loop
+	// copies the rule values.
+	cfg.PrepareRuntime()
+
 	// Create the forwarding engine with the shared configuration. The engine
 	// strips the client Accept-Encoding so that a compressing upstream cannot
 	// buffer for example SSE streams.
