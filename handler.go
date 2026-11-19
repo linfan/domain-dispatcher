@@ -37,10 +37,10 @@ func serveHTTP(w http.ResponseWriter, r *http.Request, listener ListenerConfig, 
 func handleRequest(w http.ResponseWriter, r *http.Request, reqID string, listener ListenerConfig, fwd *forwarder.Forwarder, settings *GlobalConfig) string {
 	host := requestHost(r)
 
-	// Check source IP blacklist
-	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && forwarder.IPBlacklisted(settings.SourceIPBlacklist, clientIP) {
+	// Check source IP access control
+	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && settings.AccessControl.SourceIP.Denied(clientIP) {
 		if settings.Debug {
-			log.Printf("[Port %d] id=%s [BLOCKED] source=%s - IP is blacklisted", listener.Port, reqID, r.RemoteAddr)
+			log.Printf("[Port %d] id=%s [BLOCKED] source=%s - IP is not allowed by access_control.source_ip", listener.Port, reqID, r.RemoteAddr)
 		}
 		http.Error(w, "Forbidden: request is not allowed", http.StatusForbidden)
 		return "-"

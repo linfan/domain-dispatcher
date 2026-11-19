@@ -86,9 +86,12 @@ log:                                 # 可选；不配置则输出到 stderr
   dir: /var/log/domain-dispatcher
   filename: app.log
 add_proxy_headers: true
-source_ip_blacklist:
-  - 203.0.113.7
-  - 192.168.0.0/16
+access_control:
+  source_ip:
+    blacklist:
+      - 203.0.113.7
+      - 192.168.0.0/16
+    whitelist: []
 debug: false
 
 listeners:
@@ -155,7 +158,9 @@ listeners:
   `idle_timeout`、`max_header_bytes`、`shutdown_timeout`）
 - `log`：可选的带滚动的文件日志（`dir`、`filename`、`max_size`（MB）、
   `max_backups`）；`dir`/`filename` 为空时日志输出到 stderr
-- `source_ip_blacklist`：以 403 拒绝的客户端 IP 或 CIDR 网段
+- `access_control.source_ip`：按客户端 IP 控制访问（条目为单个 IP 或 CIDR 网段）。
+  `blacklist` 中的来源以 403 拒绝；`whitelist` 非空时仅放行匹配项且优先于黑名单，
+  即白名单命中始终放行，未命中一律拒绝
 - `add_proxy_headers`：为转发的请求添加 `X-Forwarded-For`/`X-Forwarded-Proto`/
   `X-Forwarded-Host`（默认 true）。客户端已有的 `X-Forwarded-For` 会被保留并在末尾追加
   真实来源，`X-Forwarded-Proto`/`X-Forwarded-Host` 仅在缺失时补充；若监听端口直接暴露

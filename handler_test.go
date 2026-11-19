@@ -565,3 +565,43 @@ func TestServeHTTPLogs502OnForwardFailure(t *testing.T) {
 		t.Errorf("query string leaked into logs: %s", out)
 	}
 }
+
+func TestServeHTTPSourceIPWhitelist(t *testing.T) {
+	tests := []struct {
+		name      string
+		whitelist []string
+		wantCode  int
+	}{
+		{name: "non-whitelisted source blocked", whitelist: []string{"10.0.0.0/8"}, wantCode: http.StatusForbidden},
+		{name: "whitelisted source allowed", whitelist: []string{"192.0.2.0/24"}, wantCode: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Listeners = []ListenerConfig{{
+				Port: 8080,
+				Type: ListenerTypeHTTP,
+				Dispatch: []DispatchRule{{
+					Domain:     "api.example.com",
+					Type:       RuleTypeMock,
+					MockStatus: http.StatusOK,
+				}},
+			}}
+			cfg.AccessControl.SourceIP.Whitelist = tt.whitelist
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			engine := forwarder.New(cfg.Transport.EngineConfig(cfg.Transport.CompressionDisabled()))
+
+			// httptest.NewRequest sets RemoteAddr to 192.0.2.1:1234.
+			req := httptest.NewRequest(http.MethodGet, "http://api.example.com/hello", nil)
+			rec := httptest.NewRecorder()
+			serveHTTP(rec, req, cfg.Listeners[0], engine, &cfg.GlobalConfig)
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantCode, rec.Body.String())
+			}
+		})
+	}
+}

@@ -46,12 +46,19 @@ log:
   max_size: 100                    # Max size (MB) of one log file before rotation
   max_backups: 10                  # Max number of rotated files to keep
 
-# Reject requests whose source IP matches an entry below with 403.
-# Entries are individual IPs or CIDR ranges.
-source_ip_blacklist: []
-# source_ip_blacklist:
-#   - 203.0.113.7
-#   - 192.168.0.0/16
+# Source IP access control shared by all listeners. Entries are individual IPs
+# or CIDR ranges; matching requests are rejected with 403. A whitelist match
+# always admits, and a non-empty whitelist rejects every other source, so it
+# takes precedence over the blacklist.
+access_control:
+  source_ip:
+    blacklist: []
+    # blacklist:
+    #   - 203.0.113.7
+    #   - 192.168.0.0/16
+    whitelist: []
+    # whitelist:                   # once non-empty, only these sources are admitted
+    #   - 10.0.0.0/8
 
 # Add X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host to forwarded requests.
 # A client-supplied X-Forwarded-For is preserved and the real source appended; the

@@ -253,15 +253,39 @@ type ListenerConfig struct {
 	Dispatch []DispatchRule `yaml:"dispatch"`
 }
 
+// AccessControlConfig represents request admission rules shared by all
+// listeners.
+type AccessControlConfig struct {
+	SourceIP SourceIPAccessConfig `yaml:"source_ip"`
+}
+
+// SourceIPAccessConfig filters requests by client IP. Entries may be
+// individual IPs or CIDR ranges.
+type SourceIPAccessConfig struct {
+	Blacklist []string `yaml:"blacklist"`
+	Whitelist []string `yaml:"whitelist"`
+}
+
+// Denied reports whether clientIP is rejected by the access rules. A whitelist
+// match always admits; a non-empty whitelist rejects every other address, so it
+// takes precedence over the blacklist. With an empty whitelist only blacklisted
+// addresses are rejected.
+func (c *SourceIPAccessConfig) Denied(clientIP string) bool {
+	if len(c.Whitelist) > 0 {
+		return !forwarder.IPListed(c.Whitelist, clientIP)
+	}
+	return forwarder.IPListed(c.Blacklist, clientIP)
+}
+
 // GlobalConfig represents the settings shared by all listeners. Its keys are
 // inlined at the top level of the configuration file.
 type GlobalConfig struct {
-	Transport         TransportConfig `yaml:"transport"`
-	Server            ServerConfig    `yaml:"server"`
-	Log               LogConfig       `yaml:"log"`
-	SourceIPBlacklist []string        `yaml:"source_ip_blacklist"`
-	AddProxyHeaders   bool            `yaml:"add_proxy_headers"` // Add X-Forwarded-For/Proto/Host when forwarding
-	Debug             bool            `yaml:"debug"`
+	Transport       TransportConfig     `yaml:"transport"`
+	Server          ServerConfig        `yaml:"server"`
+	Log             LogConfig           `yaml:"log"`
+	AccessControl   AccessControlConfig `yaml:"access_control"`
+	AddProxyHeaders bool                `yaml:"add_proxy_headers"` // Add X-Forwarded-For/Proto/Host when forwarding
+	Debug           bool                `yaml:"debug"`
 }
 
 // Config represents the application configuration. The global settings are
@@ -330,14 +354,15 @@ func LoadConfig(filename string) (*Config, error) {
 	// The pre-restructure layout nested these keys under "global". Unknown keys
 	// are ignored by the YAML decoder, so reject the old layout explicitly
 	// instead of silently running with defaults (e.g. an empty IP blacklist).
-	var legacy struct {
-		Global *yaml.Node `yaml:"global"`
-	}
+	var legacy map[string]interface{}
 	if err := yaml.Unmarshal(data, &legacy); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
-	if legacy.Global != nil {
+	if _, ok := legacy["global"]; ok {
 		return nil, fmt.Errorf(`config: the "global" section was removed; move its keys to the top level (global.forward is now transport)`)
+	}
+	if _, ok := legacy["source_ip_blacklist"]; ok {
+		return nil, fmt.Errorf(`config: "source_ip_blacklist" was moved to "access_control.source_ip.blacklist"`)
 	}
 
 	normalize(cfg)
@@ -430,9 +455,17 @@ func (cfg *Config) Validate() error {
 		return fmt.Errorf("server timeouts must not be negative")
 	}
 
-	for _, entry := range cfg.SourceIPBlacklist {
-		if err := validateBlacklistEntry(entry); err != nil {
-			return fmt.Errorf("source_ip_blacklist: %w", err)
+	for _, list := range []struct {
+		name    string
+		entries []string
+	}{
+		{"access_control.source_ip.blacklist", cfg.AccessControl.SourceIP.Blacklist},
+		{"access_control.source_ip.whitelist", cfg.AccessControl.SourceIP.Whitelist},
+	} {
+		for _, entry := range list.entries {
+			if err := validateIPEntry(entry); err != nil {
+				return fmt.Errorf("%s: %w", list.name, err)
+			}
 		}
 	}
 
@@ -561,9 +594,9 @@ func validHeaderName(name string) bool {
 	return true
 }
 
-// validateBlacklistEntry checks a single source_ip_blacklist entry, which may be
-// an individual IP or a CIDR range.
-func validateBlacklistEntry(entry string) error {
+// validateIPEntry checks a single blacklist or whitelist entry, which may be an
+// individual IP or a CIDR range.
+func validateIPEntry(entry string) error {
 	if strings.Contains(entry, "/") {
 		if _, _, err := net.ParseCIDR(entry); err != nil {
 			return fmt.Errorf("invalid CIDR range %q", entry)

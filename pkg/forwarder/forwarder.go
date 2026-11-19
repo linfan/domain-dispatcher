@@ -418,10 +418,10 @@ func AddForwardedHeaders(r *http.Request, scheme string) {
 	}
 }
 
-// IPBlacklisted reports whether the given IP address is covered by an entry of
-// the blacklist. Entries may be individual IPs or CIDR ranges.
-func IPBlacklisted(blacklist []string, ipStr string) bool {
-	if len(blacklist) == 0 {
+// IPListed reports whether the given IP address is covered by an entry of the
+// list. Entries may be individual IPs or CIDR ranges.
+func IPListed(list []string, ipStr string) bool {
+	if len(list) == 0 {
 		return false
 	}
 
@@ -430,12 +430,12 @@ func IPBlacklisted(blacklist []string, ipStr string) bool {
 		return false
 	}
 
-	for _, blocked := range blacklist {
-		if strings.Contains(blocked, "/") {
-			if _, ipNet, err := net.ParseCIDR(blocked); err == nil && ipNet.Contains(ip) {
+	for _, entry := range list {
+		if strings.Contains(entry, "/") {
+			if _, ipNet, err := net.ParseCIDR(entry); err == nil && ipNet.Contains(ip) {
 				return true
 			}
-		} else if blockedIP := net.ParseIP(blocked); blockedIP != nil && blockedIP.Equal(ip) {
+		} else if entryIP := net.ParseIP(entry); entryIP != nil && entryIP.Equal(ip) {
 			return true
 		}
 	}

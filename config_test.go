@@ -66,6 +66,113 @@ listeners:
 	}
 }
 
+func TestLoadConfigRejectsLegacySourceIPBlacklist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	legacy := `
+source_ip_blacklist:
+  - 203.0.113.7
+listeners:
+  - port: 8080
+    dispatch:
+      - domain: api.example.com
+        forward_to: http://127.0.0.1:9000
+`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), `"source_ip_blacklist" was moved to "access_control.source_ip.blacklist"`) {
+		t.Fatalf("LoadConfig() error = %v, want legacy source_ip_blacklist error", err)
+	}
+}
+
+func TestValidateSourceIPAccessControl(t *testing.T) {
+	tests := []struct {
+		name      string
+		blacklist []string
+		whitelist []string
+		wantErr   string
+	}{
+		{
+			name:      "invalid blacklist IP",
+			blacklist: []string{"not-an-ip"},
+			wantErr:   "access_control.source_ip.blacklist: invalid IP address",
+		},
+		{
+			name:      "invalid blacklist CIDR",
+			blacklist: []string{"10.0.0.0/33"},
+			wantErr:   "access_control.source_ip.blacklist: invalid CIDR range",
+		},
+		{
+			name:      "invalid whitelist IP",
+			whitelist: []string{"nope"},
+			wantErr:   "access_control.source_ip.whitelist: invalid IP address",
+		},
+		{
+			name:      "valid entries",
+			blacklist: []string{"203.0.113.7", "192.168.0.0/16"},
+			whitelist: []string{"10.0.0.0/8", "::1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Listeners = []ListenerConfig{{
+				Port: 8080,
+				Type: ListenerTypeHTTP,
+				Dispatch: []DispatchRule{{
+					Domain:    "api.example.com",
+					ForwardTo: "http://127.0.0.1:9000",
+					Type:      RuleTypeForward,
+				}},
+			}}
+			cfg.AccessControl.SourceIP = SourceIPAccessConfig{Blacklist: tt.blacklist, Whitelist: tt.whitelist}
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSourceIPAccessControlDenied(t *testing.T) {
+	tests := []struct {
+		name      string
+		blacklist []string
+		whitelist []string
+		ip        string
+		want      bool
+	}{
+		{name: "empty lists allow", ip: "203.0.113.7", want: false},
+		{name: "blacklist exact", blacklist: []string{"203.0.113.7"}, ip: "203.0.113.7", want: true},
+		{name: "blacklist CIDR", blacklist: []string{"192.168.0.0/16"}, ip: "192.168.42.1", want: true},
+		{name: "blacklist miss", blacklist: []string{"203.0.113.7"}, ip: "198.51.100.1", want: false},
+		{name: "whitelist admits", whitelist: []string{"10.0.0.0/8"}, ip: "10.1.2.3", want: false},
+		{name: "whitelist rejects others", whitelist: []string{"10.0.0.0/8"}, ip: "203.0.113.7", want: true},
+		{name: "whitelist match overrides blacklist", blacklist: []string{"10.1.2.3"}, whitelist: []string{"10.0.0.0/8"}, ip: "10.1.2.3", want: false},
+		{name: "non-whitelisted is denied even outside blacklist", blacklist: []string{"203.0.113.7"}, whitelist: []string{"10.0.0.0/8"}, ip: "203.0.113.7", want: true},
+		{name: "unparsable IP is denied under whitelist", whitelist: []string{"10.0.0.0/8"}, ip: "not-an-ip", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ac := SourceIPAccessConfig{Blacklist: tt.blacklist, Whitelist: tt.whitelist}
+			if got := ac.Denied(tt.ip); got != tt.want {
+				t.Errorf("Denied(%q) = %v, want %v", tt.ip, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateEditAndMirror(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -87,9 +87,12 @@ log:                                 # optional; omit for stderr
   dir: /var/log/domain-dispatcher
   filename: app.log
 add_proxy_headers: true
-source_ip_blacklist:
-  - 203.0.113.7
-  - 192.168.0.0/16
+access_control:
+  source_ip:
+    blacklist:
+      - 203.0.113.7
+      - 192.168.0.0/16
+    whitelist: []
 debug: false
 
 listeners:
@@ -157,7 +160,10 @@ listeners:
   (`read_header_timeout`, `idle_timeout`, `max_header_bytes`, `shutdown_timeout`)
 - `log`: Optional file logging with rotation (`dir`, `filename`,
   `max_size` MB, `max_backups`); logs go to stderr when `dir`/`filename` are empty
-- `source_ip_blacklist`: Client IPs or CIDR ranges rejected with 403
+- `access_control.source_ip`: Source IP filtering (entries are individual IPs or
+  CIDR ranges). `blacklist` entries are rejected with 403; a non-empty
+  `whitelist` admits only matching sources and takes precedence over the
+  blacklist, so a whitelist match always passes and everything else is rejected
 - `add_proxy_headers`: Add `X-Forwarded-For`/`X-Forwarded-Proto`/`X-Forwarded-Host`
   to forwarded requests (default true). A client-supplied `X-Forwarded-For` is preserved
   and the real source is appended; the other two headers are only filled when absent.
